@@ -10,7 +10,8 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
-import tempfile
+import selectors
+import math
 import time
 from typing import Callable
 import uuid
@@ -26,6 +27,7 @@ class Policy:
     approve: Callable[[str, str], bool] = lambda name, detail: False
     approve_writes: bool = False
     allowed_hosts: set[str] = field(default_factory=set)
+    allowed_data_sources: set[str] = field(default_factory=set)
     shell_mode: str = "disabled"
     docker_image: str = "python:3.11-slim"
     read_only: bool = False
@@ -66,6 +68,8 @@ class Tool:
                      (kind == "boolean" and type(value) is bool))
             if not valid:
                 raise HarnessError(f"Invalid type for {name}: expected {kind}.")
+            if kind in {"integer", "number"} and (abs(value) > 1e15 or not math.isfinite(value)):
+                raise HarnessError(f"Argument {name} must be a bounded finite number.")
             if kind == "string" and len(value) > spec.get("maxLength", 100_000):
                 raise HarnessError(f"Argument {name} is too long.")
             if "enum" in spec and value not in spec["enum"]:
@@ -97,6 +101,10 @@ class Toolbox:
                             "path": string("Relative directory (default '.')")}, ["query"], self.search_files))
         self.register(Tool("fetch_url", "Fetch an approved public HTTPS source. No private IPs, redirects, cookies, or credentials.",
                            {"url": string("Public HTTPS source URL", maxLength=4096)}, ["url"], self.fetch_url))
+        self.register(Tool("market_prices", "Fetch daily prices from Alpha Vantage (stocks) or Coinbase (crypto). Network permission is required; returns CSV for an independently approved write. No trading.",
+            {"source": string("Data source", enum=["alphavantage", "coinbase"]),
+             "symbol": string("Ticker or crypto pair (for example BTC-USD)", maxLength=30)},
+            ["source", "symbol"], self.market_prices))
         self.register(Tool("shell", "Run a command only when shell mode is enabled and the user explicitly approves this exact command. Never bypass denied tools.",
                            {"command": string("Command for /bin/sh", maxLength=10_000),
                             "timeout": {"type": "integer", "minimum": 1, "maximum": 120}}, ["command"], self.shell))
@@ -136,35 +144,45 @@ class Toolbox:
         root = self.workspace.path(path)
         if not root.is_dir():
             raise HarnessError("Path must be a directory.")
-        paths = []
-        scanned = 0
-        for directory, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and
-                             d not in {"node_modules", "__pycache__", "venv"} and
-                             not (Path(directory) / d).is_symlink())
-            for filename in sorted(files):
-                scanned += 1
-                if scanned > 5000:
-                    return {"files": paths, "truncated": True}
-                if filename.startswith("."):
-                    continue
-                relative = str((Path(directory) / filename).relative_to(self.workspace.root))
-                try:
-                    self.workspace.path(relative)
-                except HarnessError:
-                    continue
-                paths.append(relative)
-                if len(paths) >= 500:
-                    return {"files": paths, "truncated": True}
-        return {"files": paths, "truncated": False}
+        paths, pending, scanned, truncated = [], [(root, 0)], 0, False
+        deadline = time.monotonic() + 3
+        while pending:
+            directory, depth = pending.pop()
+            if depth >= 32:
+                truncated = True
+                continue
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > 5000 or time.monotonic() > deadline:
+                        return {"files": sorted(paths), "truncated": True}
+                    if entry.name.startswith(".") or entry.name in {"node_modules", "__pycache__", "venv"} or entry.is_symlink():
+                        continue
+                    relative = str(Path(entry.path).relative_to(self.workspace.root))
+                    try:
+                        self.workspace.path(relative)
+                    except HarnessError:
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append((Path(entry.path), depth + 1))
+                    elif entry.is_file(follow_symlinks=False):
+                        paths.append(relative)
+                        if len(paths) >= 500:
+                            return {"files": sorted(paths), "truncated": True}
+        return {"files": sorted(paths), "truncated": truncated}
 
     def read_file(self, path):
         text = self.workspace.read(path)
-        return {"path": path, "sha256": hashlib.sha256(text.encode()).hexdigest(), "content": text}
+        redacted = self.store.redact(text) != text
+        return {"path": path, "sha256": None if redacted else hashlib.sha256(text.encode()).hexdigest(),
+                "content": self.store.redact(text), "editable": not redacted,
+                "note": "Contains protected values; model edits are disabled." if redacted else ""}
 
     def write_file(self, path, content, expected_sha256):
         target = self.workspace.path(path)
         old = self.workspace.read(path) if target.exists() else ""
+        if self.store.redact(old) != old or self.store.redact(content) != content or "[REDACTED]" in content:
+            raise HarnessError("Editing protected or redacted content is disabled. Edit this file manually.")
         digest = hashlib.sha256(old.encode()).hexdigest() if target.exists() else "new"
         if digest != expected_sha256:
             raise HarnessError("File changed or expected_sha256 is incorrect. Read it again before proposing an edit.")
@@ -179,7 +197,7 @@ class Toolbox:
         current_hash = hashlib.sha256(current.encode()).hexdigest() if target.exists() else "new"
         if current_hash != digest:
             raise HarnessError("File changed during approval; edit cancelled.")
-        atomic_write(target, content)
+        atomic_write(target, content, overwrite=digest != "new")
         return {"path": path, "changed": True, "sha256": hashlib.sha256(content.encode()).hexdigest()}
 
     def search_files(self, query, path="."):
@@ -205,64 +223,43 @@ class Toolbox:
             self.policy.require("fetch_url", f"Send an HTTPS GET request to:\n{url}")
         return fetch_public(url)
 
+    def market_prices(self, source, symbol):
+        from .market_data import fetch_prices
+        if source not in self.policy.allowed_data_sources:
+            self.policy.require("market_prices", f"Fetch daily financial data from {source} for {symbol}. This sends the symbol to that source.")
+        return fetch_prices(source, symbol)
+
     def shell(self, command, timeout=30):
-        mode = self.policy.shell_mode
-        if mode == "disabled":
-            raise HarnessError("Shell is disabled. The user must restart with --shell docker or --shell host.")
-        detail = f"Mode: {mode}\nDirectory: {self.workspace.root}\nTimeout: {timeout}s\nCommand:\n{command}"
-        if mode == "host":
-            detail += "\nHost mode has your OS user's file/network permissions; it is not sandboxed."
-        self.policy.require("shell", detail)
+        if self.policy.shell_mode != "docker":
+            raise HarnessError("Shell requires --shell docker. Host execution is not supported in this release.")
+        if self.store.redact(command) != command:
+            raise HarnessError("Commands containing protected credentials are not allowed.")
+        self.policy.require("shell", f"Mode: docker\nDirectory: {self.workspace.root}\nTimeout: {timeout}s\nCommand:\n{command}")
+        docker = shutil.which("docker")
+        if not docker:
+            raise HarnessError("Docker is required for shell execution. Install it and pre-pull the configured image.")
+        if "," in str(self.workspace.root):
+            raise HarnessError("Docker workspace paths cannot contain commas.")
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "TERM": "dumb"}
-        container = None
-        if mode == "docker":
-            docker = shutil.which("docker")
-            if not docker:
-                raise HarnessError("Docker is not installed. Install Docker or explicitly choose host mode.")
-            container = "eira-" + uuid.uuid4().hex[:12]
-            if "," in str(self.workspace.root):
-                raise HarnessError("Docker workspace paths cannot contain commas.")
-            argv = [docker, "run", "--rm", "--pull=never", "--name", container,
-                    "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-                    "--pids-limit=128", "--memory=512m", "--cpus=1", "--user", f"{os.getuid()}:{os.getgid()}",
-                    "--mount", f"type=bind,src={self.workspace.root},dst=/workspace",
-                    "--tmpfs", "/workspace/.eira:rw,size=1m,mode=0700",
-                    "--tmpfs", "/tmp:rw,size=64m,mode=1777", "--workdir", "/workspace",
-                    self.policy.docker_image, "/bin/sh", "-c", command]
-        else:
-            argv = ["/bin/sh", "-c", command]
-        with tempfile.TemporaryFile() as output:
-            process = subprocess.Popen(argv, cwd=self.workspace.root, env=env,
-                                       stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                                       start_new_session=True)
-            started = time.monotonic()
-            reason = None
+        container = "eira-" + uuid.uuid4().hex[:12]
+        argv = [docker, "run", "--pull=never", "--name", container,
+                "--log-driver=none", "--network=none", "--read-only", "--cap-drop=ALL",
+                "--security-opt=no-new-privileges", "--pids-limit=128", "--memory=512m", "--cpus=1",
+                "--user", f"{os.getuid()}:{os.getgid()}",
+                "--mount", f"type=bind,src={self.workspace.root},dst=/workspace",
+                "--tmpfs", "/workspace/.eira:rw,size=1m,mode=0700",
+                "--tmpfs", "/tmp:rw,size=64m,mode=1777", "--workdir", "/workspace",
+                "--entrypoint", "/bin/sh", self.policy.docker_image, "-c", command]
+        try:
+            return _run_bounded(argv, self.workspace.root, env, timeout)
+        finally:
             try:
-                while process.poll() is None:
-                    if time.monotonic() - started > timeout:
-                        reason = "timeout"
-                        break
-                    if os.fstat(output.fileno()).st_size > 1_000_000:
-                        reason = "output_limit"
-                        break
-                    time.sleep(0.05)
-            finally:
-                # Also kill descendants left running after their parent exits.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
-                if container:
-                    try:
-                        subprocess.run([argv[0], "rm", "-f", container], stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, timeout=10, env=env)
-                    except (OSError, subprocess.TimeoutExpired):
-                        pass
-            output.seek(0)
-            data = output.read(20_001)
-        return {"exit_code": process.returncode, "output": data[:20_000].decode(errors="replace"),
-                "truncated": len(data) > 20_000, "stopped": reason}
+                cleanup = subprocess.run([docker, "rm", "-f", container], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=10, env=env)
+                if cleanup.returncode != 0:
+                    raise HarnessError(f"Container cleanup was not verified: {container}.")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise HarnessError(f"Container cleanup failed; inspect Docker container {container}.") from exc
 
     def backtest_sma(self, path, **parameters):
         result = backtest(self.workspace.read(path, 5_000_000), **parameters)
@@ -281,3 +278,45 @@ class Toolbox:
     def set_plan(self, plan):
         self.store.event(self.session, "plan", {"plan": plan})
         return {"plan": plan}
+
+
+def _run_bounded(argv, cwd, env, timeout):
+    """Capture a finite prefix through a pipe; never spool arbitrary output to disk."""
+    process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    captured, total, reason = bytearray(), 0, None
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    reason = "timeout"
+                    break
+                ready = selector.select(left)
+                if not ready:
+                    reason = "timeout"
+                    break
+                data = os.read(process.stdout.fileno(), min(65536, 1_000_001 - total))
+                if not data:
+                    # stdout can close before the process exits.
+                    try:
+                        process.wait(timeout=max(.001, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        reason = "timeout"
+                    break
+                total += len(data)
+                captured.extend(data[:max(0, 20_001 - len(captured))])
+                if total > 1_000_000:
+                    reason = "output_limit"
+                    break
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        process.stdout.close()
+    return {"exit_code": process.returncode, "output": bytes(captured[:20_000]).decode(errors="replace"),
+            "truncated": total > 20_000, "stopped": reason}

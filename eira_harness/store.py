@@ -49,13 +49,15 @@ class Store:
 
     def encode(self, data) -> str:
         # Redact strings before encoding so escaping cannot hide secret values.
-        def walk(value):
+        def walk(value, depth=0):
+            if depth > 32:
+                raise HarnessError("Stored data exceeds the nesting limit.")
             if isinstance(value, str):
                 return self.redact(value)
             if isinstance(value, list):
-                return [walk(x) for x in value]
+                return [walk(x, depth + 1) for x in value]
             if isinstance(value, dict):
-                return {self.redact(str(k)): walk(v) for k, v in value.items()}
+                return {self.redact(str(k)): walk(v, depth + 1) for k, v in value.items()}
             return value
         return json.dumps(walk(data), ensure_ascii=False, allow_nan=False)
 
@@ -116,6 +118,8 @@ class Store:
     def remember(self, key: str, value: str):
         if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", key) or len(value) > 2000:
             raise HarnessError("Memory needs a simple key (1–80 characters) and at most 2,000 characters.")
+        if self.redact(key) != key or self.redact(value) != value:
+            raise HarnessError("Memory cannot contain protected credentials.")
         if len(self.memories()) >= 50 and key not in self.memories():
             raise HarnessError("Memory is limited to 50 entries. Update or remove an existing entry.")
         with self.db:

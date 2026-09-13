@@ -118,14 +118,10 @@ class RuntimeTests(unittest.TestCase):
             self.tools.shell("touch should-not-exist")
         self.assertFalse((self.root / "should-not-exist").exists())
 
-    def test_host_shell_timeout_and_output_capture(self):
+    def test_host_shell_is_not_available(self):
         self.tools.policy = Policy(approve=lambda *x: True, shell_mode="host")
-        output = self.tools.shell("printf hello")
-        self.assertEqual(output["output"], "hello")
-        self.assertEqual(output["exit_code"], 0)
-        result = self.tools.shell("sleep 5", timeout=1)
-        self.assertEqual(result["stopped"], "timeout")
-        self.assertNotEqual(result["exit_code"], 0)
+        with self.assertRaises(HarnessError):
+            self.tools.shell("true")
 
     def test_search_reports_lines(self):
         (self.root / "code.py").write_text("one\nneedle\nthree\n")

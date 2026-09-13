@@ -29,7 +29,8 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | `provider.py` | HTTP transport and validation of the Chat Completions response envelope |
 | `tools.py` | Tool definitions, argument validation, workspace operations, execution policy |
 | `security.py` | Path checks, atomic file writes, best-effort secret redaction, terminal sanitization |
-| `network.py` | Public HTTPS text retrieval with checked-IP connection pinning |
+| `network.py` | Bounded HTTP transport, total deadlines, address pinning, and text retrieval |
+| `market_data.py` | Fixed-source daily price retrieval and CSV normalization |
 | `finance.py` | Deterministic SMA simulation, metrics, report formatting |
 | `store.py` | SQLite journal, workspace memory, per-session file locks |
 | `demo.py` | Synthetic data generator and offline fixture provider |

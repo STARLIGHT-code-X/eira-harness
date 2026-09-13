@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 from datetime import date
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import io
 import math
@@ -11,24 +12,65 @@ import statistics
 from .security import HarnessError
 
 
-def read_prices(text: str) -> list[tuple[str, float]]:
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames or not {"date", "close"} <= set(reader.fieldnames):
+def _safe_csv_rows(reader):
+    try:
+        yield from reader
+    except csv.Error as exc:
+        raise HarnessError("Malformed CSV input.") from exc
+
+
+def _parse_price_rows(text: str) -> list[tuple[str, Decimal]]:
+    """Parse a date/close CSV without DictReader's silent data loss.
+
+    Named columns beyond date and close are accepted for provider exports. Every
+    physical row still has to have the same number of fields, and duplicate
+    header names are rejected instead of allowing DictReader to overwrite one.
+    Decimal values are retained for the signal calculation; converting to float
+    before calculating a moving average can erase small, meaningful differences.
+    """
+    if not isinstance(text, str):
         raise HarnessError("CSV needs date and close columns (ISO YYYY-MM-DD, positive prices).")
-    rows = []
+    try:
+        reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+        header = next(reader, None)
+    except (csv.Error, TypeError, ValueError) as exc:
+        raise HarnessError("CSV needs date and close columns (ISO YYYY-MM-DD, positive prices).") from exc
+    if not header or any(not isinstance(name, str) or not name for name in header):
+        raise HarnessError("CSV needs date and close columns (ISO YYYY-MM-DD, positive prices).")
+    if len({name.casefold() for name in header}) != len(header):
+        raise HarnessError("CSV headers must be unique.")
+    try:
+        date_column = header.index("date")
+        close_column = header.index("close")
+    except ValueError as exc:
+        raise HarnessError("CSV needs date and close columns (ISO YYYY-MM-DD, positive prices).") from exc
+
+    rows: list[tuple[str, Decimal]] = []
     previous = None
-    for number, row in enumerate(reader, 2):
+    for number, row in enumerate(_safe_csv_rows(reader), 2):
+        # csv.reader emits [] for a blank physical line; DictReader ignored it.
+        if not row:
+            continue
         if len(rows) >= 50_000:
             raise HarnessError("CSV is limited to 50,000 daily bars.")
+        if len(row) != len(header):
+            raise HarnessError(f"Invalid CSV row {number}: field count must match the header.")
         try:
-            raw_date = row["date"]
+            raw_date = row[date_column]
             stamp = date.fromisoformat(raw_date)
-            price = float(row["close"])
-            if stamp.isoformat() != raw_date or not math.isfinite(price) or not 1e-12 <= price <= 1e12:
+            if stamp.isoformat() != raw_date:
+                raise ValueError()
+            raw_price = row[close_column].strip()
+            # A lexical bound keeps Decimal work bounded for hostile inputs while
+            # retaining ample precision for ordinary provider exports.
+            if len(raw_price) > 128:
+                raise ValueError()
+            price = Decimal(raw_price)
+            if not price.is_finite() or not Decimal("1e-12") <= price <= Decimal("1e12"):
                 raise ValueError()
             if previous is not None and stamp <= previous:
                 raise ValueError()
-        except (ValueError, TypeError, KeyError) as exc:
+        except (InvalidOperation, ValueError, TypeError, IndexError) as exc:
             raise HarnessError(f"Invalid CSV row {number}: dates must increase strictly and prices must be finite, between 1e-12 and 1e12.") from exc
         previous = stamp
         rows.append((stamp.isoformat(), price))
@@ -37,17 +79,37 @@ def read_prices(text: str) -> list[tuple[str, float]]:
     return rows
 
 
+def read_prices(text: str) -> list[tuple[str, float]]:
+    return [(stamp, float(price)) for stamp, price in _parse_price_rows(text)]
+
+
+def _finite_number(value, label: str) -> float:
+    """Validate numbers without allowing math.isfinite to overflow on huge ints."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HarnessError("Backtest parameters must be finite numbers.")
+    try:
+        converted = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise HarnessError("Backtest parameters must be finite numbers.") from None
+    if not math.isfinite(converted):
+        raise HarnessError("Backtest parameters must be finite numbers.")
+    return converted
+
+
 def backtest(text: str, fast: int = 10, slow: int = 30, capital: float = 10_000,
              fee_bps: float = 10, slippage_bps: float = 5, exposure: float = 1.0,
              max_drawdown: float = 0.20, periods_per_year: int = 252) -> dict:
-    rows = read_prices(text)
+    decimal_rows = _parse_price_rows(text)
+    rows = [(stamp, float(price)) for stamp, price in decimal_rows]
     if type(fast) is not int or type(slow) is not int or not 1 <= fast < slow < len(rows):
         raise HarnessError("Windows must satisfy 1 <= fast < slow < number of rows.")
     if type(periods_per_year) is not int or not 1 <= periods_per_year <= 366:
         raise HarnessError("periods_per_year must be an integer from 1 to 366 for daily data.")
-    numbers = [capital, fee_bps, slippage_bps, exposure, max_drawdown]
-    if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in numbers):
-        raise HarnessError("Backtest parameters must be finite numbers.")
+    capital = _finite_number(capital, "capital")
+    fee_bps = _finite_number(fee_bps, "fee_bps")
+    slippage_bps = _finite_number(slippage_bps, "slippage_bps")
+    exposure = _finite_number(exposure, "exposure")
+    max_drawdown = _finite_number(max_drawdown, "max_drawdown")
     if not (0 < capital <= 1e12 and 0 <= fee_bps <= 1000 and 0 <= slippage_bps <= 1000
             and 0 < exposure <= 1 and 0 < max_drawdown <= 1):
         raise HarnessError("Invalid capital, costs, exposure, or drawdown limit.")
@@ -57,9 +119,9 @@ def backtest(text: str, fast: int = 10, slow: int = 30, capital: float = 10_000,
     halted = False
     worst_drawdown = 0.0
     closes = [row[1] for row in rows]
-    prefix = [0.0]
-    for price in closes:
-        prefix.append(prefix[-1] + price)
+    decimal_closes = [row[1] for row in decimal_rows]
+    fast_sum = Decimal(0)
+    slow_sum = Decimal(0)
 
     def buy(stamp, price):
         nonlocal cash, quantity
@@ -79,38 +141,58 @@ def backtest(text: str, fast: int = 10, slow: int = 30, capital: float = 10_000,
                        "fill": fill, "fee": proceeds * fee, "reason": reason})
         quantity = 0.0
 
-    for i, (stamp, price) in enumerate(rows):
-        marked = cash + quantity * price
-        peak = max(peak, marked)
-        if quantity and 1 - marked / peak >= max_drawdown:
-            sell(stamp, price, "drawdown_stop")
-            halted = True
-        # The current row is deliberately excluded from the signal.
-        if i >= slow and not halted and i < len(rows) - 1:
-            fast_mean = (prefix[i] - prefix[i-fast]) / fast
-            slow_mean = (prefix[i] - prefix[i-slow]) / slow
-            if fast_mean > slow_mean and quantity == 0:
-                buy(stamp, price)
-            elif fast_mean <= slow_mean and quantity > 0:
-                sell(stamp, price, "sma_signal")
-        if i == len(rows) - 1 and quantity:
-            sell(stamp, price, "end_of_data")
-        equity = cash + quantity * price
-        peak = max(peak, equity)
-        drawdown = 1 - equity / peak
-        worst_drawdown = max(worst_drawdown, drawdown)
-        # Exit fees can breach the limit after a signal has already sold the
-        # position. Latch the stop even when already in cash to prevent reentry.
-        if drawdown >= max_drawdown:
-            if quantity:
+    # Decimal rolling sums keep SMA comparisons stable and linear in the number
+    # of bars. The local precision is deliberately bounded; prices themselves
+    # are bounded to 128 characters above.
+    precision = 160
+    with localcontext() as decimal_context:
+        decimal_context.prec = precision
+        for i, (stamp, price) in enumerate(rows):
+            if i:
+                fast_sum += decimal_closes[i - 1]
+                slow_sum += decimal_closes[i - 1]
+                if i - fast - 1 >= 0:
+                    fast_sum -= decimal_closes[i - fast - 1]
+                if i - slow - 1 >= 0:
+                    slow_sum -= decimal_closes[i - slow - 1]
+
+            marked = cash + quantity * price
+            if not math.isfinite(marked):
+                raise HarnessError("Simulation exceeded the supported numeric range.")
+            peak = max(peak, marked)
+            if quantity and 1 - marked / peak >= max_drawdown:
                 sell(stamp, price, "drawdown_stop")
-            halted = True
-            equity = cash
+                halted = True
+            # The current row is deliberately excluded from the signal.
+            if i >= slow and not halted and i < len(rows) - 1:
+                fast_mean = fast_sum / fast
+                slow_mean = slow_sum / slow
+                if fast_mean > slow_mean and quantity == 0:
+                    buy(stamp, price)
+                elif fast_mean <= slow_mean and quantity > 0:
+                    sell(stamp, price, "sma_signal")
+            if i == len(rows) - 1 and quantity:
+                sell(stamp, price, "end_of_data")
+            equity = cash + quantity * price
+            if not math.isfinite(equity):
+                raise HarnessError("Simulation exceeded the supported numeric range.")
+            peak = max(peak, equity)
             drawdown = 1 - equity / peak
             worst_drawdown = max(worst_drawdown, drawdown)
-        curve.append({"date": stamp, "equity": round(equity, 6),
-                      "drawdown": round(drawdown, 8)})
-    returns = [curve[i]["equity"] / curve[i-1]["equity"] - 1 for i in range(1, len(curve))]
+            # Exit fees can breach the limit after a signal has already sold the
+            # position. Latch the stop even when already in cash to prevent reentry.
+            if drawdown >= max_drawdown:
+                if quantity:
+                    sell(stamp, price, "drawdown_stop")
+                halted = True
+                equity = cash
+                drawdown = 1 - equity / peak
+                worst_drawdown = max(worst_drawdown, drawdown)
+            # Keep full precision in the source curve. Rounded values here used
+            # to feed returns and could create zero denominators for tiny capital.
+            curve.append({"date": stamp, "equity": equity, "drawdown": drawdown})
+    returns = [curve[i]["equity"] / curve[i-1]["equity"] - 1 for i in range(1, len(curve))
+               if curve[i-1]["equity"] != 0]
     deviation = statistics.stdev(returns) if len(returns) > 1 else 0
     sharpe = statistics.mean(returns) / deviation * math.sqrt(periods_per_year) if deviation > 1e-12 else None
     benchmark_quantity = capital / (closes[0] * (1 + slip) * (1 + fee))

@@ -5,7 +5,7 @@ The initial goal is an inspectable, provider-configurable local harness that can
 ## Next: prove coding and research quality
 
 1. Run a fixed evaluation set against chosen tool-capable models: repository bug fixes, data investigations, cited research, and strategy revisions. Record task success, invalid tool calls, cost, latency, and denied-action handling.
-2. Add streaming, provider-specific usage normalization, and reversible context compaction that preserves original messages and source references.
+2. Add streaming and reversible context compaction that preserves original messages and source references. v0.2 normalizes supported provider usage counters.
 3. Expand file editing to structured patches with independent review and rollback artifacts.
 4. Integration-test Docker execution on Linux and macOS; support a reproducible development image and rootless environments.
 
@@ -18,10 +18,10 @@ The initial goal is an inspectable, provider-configurable local harness that can
 
 ## Financial depth
 
-1. Provenanced market-data connectors and data validation for splits, dividends, missing observations, and exchange calendars.
+1. Extend the v0.2 Alpha Vantage and Coinbase daily-price connectors with adjusted data and validation for splits, dividends, missing observations, and exchange calendars.
 2. More deterministic strategy families, parameter sweeps, walk-forward splits, turnover and exposure reporting, and out-of-sample evaluation.
 3. A persistent forward paper-trading service with event timestamps, replayable fills, and failure recovery.
-4. Only after validation: separately reviewed live execution adapters with broker-side limits and explicit authorization. This is not part of v0.1.
+4. Only after validation: separately reviewed live execution adapters with broker-side limits and explicit authorization. This is not part of v0.2.
 
 ## Operations
 

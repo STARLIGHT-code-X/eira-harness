@@ -1,37 +1,33 @@
 # Security boundaries
 
-Eira is an early local developer tool. It has not received an external security audit. Its default capabilities are narrow; this does not make an LLM or arbitrary generated code trustworthy.
+Eira 0.2 is an early local developer tool. It has received an internal code review and regression testing, not an independent security certification. Use a dedicated project workspace without secrets.
 
-## Enforced by application code
+## Enforced controls
 
-- Workspace file tools reject absolute paths, parent traversal, symlinks, hard links, known credential locations, and internal state/VCS paths.
-- File writes require approval and an expected content hash; the hash is rechecked after approval. `--approve-writes` is an explicit exception for file and memory writes only.
-- `--read-only` takes precedence over write grants and blocks shell execution. Session logging still writes to `.eira/`.
-- Shell is disabled by default. Enabling it still requires interactive approval for every command. Piped input cannot approve.
-- Research GETs need approval or an exact hostname grant. URLs must use HTTPS port 443 and no embedded credentials. All resolved addresses must be public; TLS connects to a checked IP using the original hostname for certificate validation. Redirects are refused.
-- Model endpoint configuration is user-controlled. Remote endpoints require HTTPS. Model API credentials are used only by that adapter.
-- Tool calls and context have bounded sizes. Runtime steps, tool calls, and reported token usage are bounded. These are not a strict billing guarantee.
-- Known environment credential values are redacted before journal serialization. Terminal control sequences are stripped from rendered text.
-- Interrupted tool calls are never automatically replayed.
+- File tools reject traversal, symlinks, hard links, protected configuration paths, common credential files, and Eira/VCS state. Standard home configuration directories and configured credential paths are protected even when selected through an ancestor workspace.
+- Reads and directory scans have byte, entry, depth, and time limits. These are application checks, not a hardened filesystem sandbox against concurrent object replacement.
+- Approval material uses JSON-escaped lines so invisible characters remain visible. Shell and financial-source approvals are separate from file-write grants.
+- Files containing recognized secret values are marked uneditable by model tools. Full-file writes containing redaction placeholders or recognized credentials are rejected. Optimistic hashes are rechecked after approval; creation fails atomically if another file already exists.
+- Shell is disabled by default. The only supported execution mode is Docker with an interactive approval for each command. Host shell mode has been removed. There is no global autoapprove flag.
+- Docker runs without networking, with dropped capabilities, resource limits, a read-only container root, an explicit shell entrypoint, and Docker logging disabled. Output is captured through a bounded pipe, not an unbounded temporary file. Cleanup removes the named container; failed cleanup is reported.
+- Public research and financial-data requests require public HTTPS port 443, resolve and validate destination addresses, pin the connection to a checked address, and refuse redirects. Byte limits and total deadlines apply. Stalled DNS workers are capped and cannot prevent process exit.
+- Model endpoints use HTTPS except actual loopback HTTP. Provider profiles select their own credential variable. Endpoint overrides use only `EIRA_API_KEY`, never a named provider's key. The selected model endpoint receives relevant conversation and tool data.
+- JSON parsing and stored data have depth bounds. Provider messages and usage are validated before use. Runtime limits bound steps, tool calls, context, and reported token usage; the latter is not a strict billing cap.
+- `--read-only` denies file/memory edits and shell execution. Session journaling still writes. It does not mean offline: model requests and separately granted research/data requests remain possible.
+- Interrupted tools are recorded as having unknown outcomes and are never replayed automatically.
 
-## Important limits
+## Limits that remain
 
-Path checks and atomic writes are not a hardened filesystem sandbox. A hostile process concurrently swapping filesystem objects can race checks. Do not run Eira against a workspace controlled by an adversary. The `.eira/` database is not encrypted, tamper-proof, or an authority boundary against someone who controls your OS account.
+Docker must be installed and its chosen image pre-pulled. The Docker integration is implemented and its command construction is tested, but it was not exercised against a real Docker daemon in this development environment. A selected image remains a trusted dependency. Docker and the host OS must be maintained by the operator.
 
-Host shell mode has your OS user's filesystem and network permissions. Removing credential environment variables does not stop a program from reading files or connecting to services available to that user. Docker mode isolates execution more strongly, but the workspace is writable and its files are visible to commands. Use a dedicated workspace with no secrets, review the image and commands, and keep Docker patched. Rootless Docker or a VM can improve isolation. A malicious custom image may have behavior beyond the supplied command.
+The workspace mount is writable and visible to approved shell commands, including files that file tools would block. The `.eira` directory is covered by a container tmpfs, but other workspace secrets are not automatically hidden. Workspace disk consumption by arbitrary programs is not quota-controlled. Do not mount your home directory or a workspace containing credentials. A container is not equivalent to a VM, and these controls do not establish production-grade isolation.
 
-The mount at `/workspace/.eira` hides Eira's state directory inside Docker. It does not hide every sensitive path in the workspace, nor can Docker isolate secrets you intentionally mount. The initial Docker path is implemented but has not been integration-tested in the development environment because Docker was unavailable.
+Path checks can race a hostile local process. The state database is permission-restricted but not encrypted, tamper-proof, or an authority boundary against the same OS account. Redaction is best-effort: unknown, transformed, encoded, or pasted secrets may remain. Guidance, fetched text, and memory are untrusted context; prompt instructions alone are not a complete prompt-injection defense.
 
-Prompt instructions tell the agent to treat retrieved content and memory as untrusted, and to respect denials. Prompt instructions are not a complete prompt-injection defense. Native policy gates remain outside the model. An approved shell command can bypass file-tool boundaries, so review commands as programs, not just their natural-language explanations.
+Changing providers or resuming sessions sends existing relevant history to the newly selected provider. Choose endpoints and data handling deliberately. Never store credentials in `EIRA.md`, saved notes, examples, or traces intended for sharing.
 
-Secret redaction is best effort. Unknown secrets in files, encodings, transformed values, and pasted data can remain in model input or traces. Your model provider receives the relevant conversation, file excerpts, tool schemas, results, project guide, and remembered notes. Pick an endpoint whose data handling fits your needs. Never store API keys in `EIRA.md` or memory.
+Financial adapters only retrieve daily prices from fixed sources. They do not place orders, transfer assets, or connect to a brokerage account. Prices may be delayed, incomplete, or unadjusted. Backtests omit dividends, taxes, liquidity, leverage, and intraday execution; historical results do not establish future returns. Adding trading requires a separate execution and risk-control design.
 
-## Financial boundary
+## Reporting
 
-There is no native tool for placing trades or transferring funds. The stock backtester uses supplied CSV data and simulated capital. It does not connect to wallets or brokers. Host commands can technically access arbitrary software, so the harness also instructs the agent not to use shell execution for financial transactions. That instruction cannot replace an OS-level restriction or a broker-side risk control.
-
-Before adding any execution connector, implement a separate capability and approval system, exact asset resolution, idempotent intent records, position/exposure limits enforced by code, a kill switch, and independent security review. Do not infer permission to move money from permission to research or code.
-
-## Reporting issues
-
-Use a private channel to the repository owner for vulnerabilities. Do not publish credentials, private traces, or exploitable details in an ordinary public issue. GitHub security advisories can be enabled by the owner when the repository is ready for external collaboration.
+Report suspected issues privately to the repository owner. Do not include real credentials or private traces in public issues. The owner may enable GitHub private vulnerability reporting for coordinated reports.

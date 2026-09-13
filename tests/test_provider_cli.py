@@ -79,7 +79,7 @@ class ProviderTests(unittest.TestCase):
             out = io.StringIO()
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
                 code = main(["run", "Read input.txt", "--workspace", root,
-                             "--model", "test-model", "--base-url", self.url, "--read-only", "--json"])
+                             "--provider", "custom", "--model", "test-model", "--base-url", self.url, "--read-only", "--json"])
             self.assertEqual(code, 0)
             self.assertEqual(len(self.requests), 2)
             tool_result = self.requests[1]["body"]["messages"][-1]

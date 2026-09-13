@@ -84,6 +84,26 @@ class FinanceTests(unittest.TestCase):
         self.assertIn("Data SHA-256", markdown_report(result))
         self.assertTrue(math.isfinite(result["metrics"]["final_equity"]))
 
+    def test_duplicate_headers_and_row_field_counts_are_rejected(self):
+        with self.assertRaises(HarnessError):
+            read_prices("date,close,close\n2025-01-01,10,10\n2025-01-02,11,11\n2025-01-03,12,12")
+        with self.assertRaises(HarnessError):
+            read_prices("date,close,volume\n2025-01-01,10\n2025-01-02,11,2\n2025-01-03,12,3")
+
+    def test_extra_named_columns_are_allowed(self):
+        parsed = read_prices("date,close,volume\n2025-01-01,10,2\n2025-01-02,11,3\n2025-01-03,12,4")
+        self.assertEqual(parsed, [("2025-01-01", 10.0), ("2025-01-02", 11.0), ("2025-01-03", 12.0)])
+
+    def test_huge_integer_parameters_are_rejected_without_overflow(self):
+        with self.assertRaises(HarnessError):
+            backtest(sample_csv(), capital=10 ** 1000)
+
+    def test_equity_curve_keeps_precision_for_return_calculation(self):
+        result = backtest(prices([1, 1, 1]), fast=1, slow=2, capital=0.0000004,
+                          fee_bps=0, slippage_bps=0)
+        self.assertGreater(result["equity_curve"][0]["equity"], 0)
+        self.assertEqual(result["metrics"]["total_return"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

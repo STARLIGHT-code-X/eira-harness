@@ -12,8 +12,8 @@ from . import __version__
 from .agent import Agent, Limits
 from .demo import DemoProvider, sample_csv
 from .finance import backtest, markdown_report
-from .provider import Provider
-from .security import HarnessError, Redactor, Workspace, atomic_write, clean_terminal
+from .provider import build_provider
+from .security import HarnessError, Redactor, Workspace, atomic_write, clean_terminal, approval_text
 from .store import Store
 from .tools import Policy, Toolbox
 
@@ -26,7 +26,8 @@ def approve(name: str, detail: str) -> bool:
     # Piped input can never silently authorize a side effect.
     if not sys.stdin.isatty():
         return False
-    print_safe(f"\nApproval required · {name}\n{detail}", file=sys.stderr)
+    print_safe(f"\nApproval required · {name} (JSON-escaped lines)", file=sys.stderr)
+    print(approval_text(Redactor()(detail)), file=sys.stderr, flush=True)
     print("\nApprove this action? [y/N] ", end="", file=sys.stderr, flush=True)
     return sys.stdin.readline().strip().lower() == "y"
 
@@ -63,12 +64,14 @@ def build_parser():
     def model_options(command):
         workspace(command)
         command.add_argument("--model", default=os.getenv("EIRA_MODEL", ""))
-        command.add_argument("--base-url", default=os.getenv("EIRA_BASE_URL", "https://api.openai.com/v1"))
+        command.add_argument("--provider", choices=["openai", "anthropic", "openrouter", "gemini", "ollama", "custom"], default=os.getenv("EIRA_PROVIDER", "openai"))
+        command.add_argument("--base-url", default=os.getenv("EIRA_BASE_URL") or None)
+        command.add_argument("--allow-data-source", action="append", choices=["alphavantage", "coinbase"], default=[], help="Preapprove a native daily-price source")
         command.add_argument("--session", help="Resume a session from this workspace")
         command.add_argument("--read-only", action="store_true", help="Deny file writes, memory writes, and shell calls")
         command.add_argument("--approve-writes", action="store_true", help="Preapprove workspace file and memory writes; never shell/network")
         command.add_argument("--allow-host", action="append", default=[], help="Preapprove HTTPS GET requests to this exact hostname (repeatable)")
-        command.add_argument("--shell", choices=["disabled", "docker", "host"], default="disabled")
+        command.add_argument("--shell", choices=["disabled", "docker"], default="disabled")
         command.add_argument("--docker-image", default="python:3.11-slim", help="Pre-pulled Docker image for shell mode")
         command.add_argument("--max-steps", type=int, default=20)
         command.add_argument("--max-tool-calls", type=int, default=50)
@@ -107,17 +110,22 @@ def build_parser():
     bt.add_argument("--max-drawdown", type=float, default=.20)
     bt.add_argument("--periods-per-year", type=int, default=252)
     bt.add_argument("--output", help="New workspace-relative .json or .md report (never overwrites)")
+    sub.add_parser("providers", help="List model provider profiles and credential variables")
+    prices = sub.add_parser("prices", help="Download daily prices from a fixed financial-data source")
+    workspace(prices)
+    prices.add_argument("source", choices=["alphavantage", "coinbase"])
+    prices.add_argument("symbol", help="Stock symbol or crypto pair such as BTC-USD")
+    prices.add_argument("--output", help="Save a new workspace-relative CSV; never overwrite")
     return parser
 
 
 def run_agent(args, store, workspace):
     if args.read_only and args.approve_writes:
         raise HarnessError("Choose either --read-only or --approve-writes.")
-    api_key = os.getenv("EIRA_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-    provider = Provider(args.model, args.base_url, api_key)
+    provider = build_provider(args.provider, args.model, args.base_url)
     policy = Policy(approve=approve, approve_writes=args.approve_writes, read_only=args.read_only,
                     allowed_hosts={h.lower() for h in args.allow_host}, shell_mode=args.shell,
-                    docker_image=args.docker_image)
+                    docker_image=args.docker_image, allowed_data_sources=set(args.allow_data_source))
     session = args.session or store.create(args.prompt if args.command == "run" else "Interactive session")
     toolbox = Toolbox(workspace, store, policy, session)
     agent = Agent(provider, store, toolbox, renderer(args.json), Limits(
@@ -152,6 +160,10 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     store = None
     try:
+        if args.command == "providers":
+            from .provider import PROFILES
+            print_safe(json.dumps(PROFILES, indent=2))
+            return 0
         if args.command in {"init", "demo"}:
             args.workspace.mkdir(parents=True, exist_ok=True)
         workspace = Workspace(args.workspace)
@@ -164,6 +176,20 @@ def main(argv=None):
                       "live_provider_tested": False}
             print_safe(json.dumps(report, indent=2))
             return 0
+        if args.command == "prices":
+            from .market_data import fetch_prices
+            data = fetch_prices(args.source, args.symbol)
+            if args.output:
+                target = workspace.path(args.output)
+                if target.suffix.lower() != ".csv" or target.exists():
+                    raise HarnessError("Choose a new .csv output path; existing files are never overwritten.")
+                atomic_write(target, data["csv"], overwrite=False)
+                metadata = {key: value for key, value in data.items() if key != "csv"}
+                print_safe(json.dumps({"output": str(target), **metadata}, indent=2))
+            else:
+                print_safe(data["csv"])
+                print_safe(json.dumps({key: value for key, value in data.items() if key != "csv"}), file=sys.stderr)
+            return 0
         if args.command == "backtest":
             result = backtest(workspace.read(args.csv, 5_000_000),
                               **{key: getattr(args, key) for key in
@@ -175,7 +201,7 @@ def main(argv=None):
                 if target.exists():
                     raise HarnessError("Output already exists; choose a new report path.")
                 content = json.dumps(result, indent=2, allow_nan=False) if target.suffix == ".json" else markdown_report(result)
-                atomic_write(target, content)
+                atomic_write(target, content, overwrite=False)
                 print_safe(str(target))
             else:
                 print_safe(json.dumps(result, indent=2, allow_nan=False))

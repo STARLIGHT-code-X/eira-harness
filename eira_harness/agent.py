@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 from typing import Callable
 
-from .security import HarnessError
+from .security import HarnessError, bounded_json_loads
 from .store import Store
 from .tools import Toolbox
 
@@ -118,11 +118,9 @@ class Agent:
                             tools_used += 1
                             self.event("tool_started", call_id=call["id"], name=name)
                             try:
-                                def reject_constant(value):
-                                    raise ValueError("Nonfinite number")
-                                arguments = json.loads(call["function"]["arguments"], parse_constant=reject_constant)
+                                arguments = bounded_json_loads(call["function"]["arguments"])
                                 result = {"ok": True, "result": self.toolbox.call(name, arguments)}
-                            except (HarnessError, ValueError, TypeError, OSError, UnicodeError) as exc:
+                            except (HarnessError, ValueError, TypeError, OSError, UnicodeError, OverflowError, RecursionError) as exc:
                                 result = {"ok": False, "error": str(exc)}
                         encoded = self.store.encode(result)
                         if len(encoded) > self.limits.max_tool_output_chars:

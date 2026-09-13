@@ -1,4 +1,4 @@
-include LICENSE README.md
+include LICENSE README.md install.sh
 recursive-include docs *.md
 recursive-include examples *.csv *.md
 recursive-include tests *.py

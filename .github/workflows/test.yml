@@ -18,6 +18,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install .
-      - run: python -m unittest discover -s tests -v
-      - run: eira demo --workspace /tmp/eira-ci-demo --json
+      - name: Build wheel and source distribution
+        run: |
+          python -m pip install build
+          python -m build --wheel --sdist --outdir "$RUNNER_TEMP/eira-dist"
+          test -n "$(find "$RUNNER_TEMP/eira-dist" -name 'eira_harness-*.whl' -print -quit)"
+          test -n "$(find "$RUNNER_TEMP/eira-dist" -name 'eira_harness-*.tar.gz' -print -quit)"
+      - name: Install wheel outside the checkout
+        run: |
+          python -m venv "$RUNNER_TEMP/eira-venv"
+          "$RUNNER_TEMP/eira-venv/bin/python" -m pip install --no-deps "$(find "$RUNNER_TEMP/eira-dist" -name 'eira_harness-*.whl' -print -quit)"
+      - name: Test installed wheel
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/eira-venv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -v
+      - name: Run installed demo
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/eira-venv/bin/eira" demo --workspace "$RUNNER_TEMP/eira-ci-demo" --json
