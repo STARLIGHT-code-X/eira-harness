@@ -5,7 +5,7 @@
 # The release process replaces RELEASE_COMMIT after the source commit exists.
 set -eu
 
-SOURCE_REF="RELEASE_COMMIT"
+SOURCE_REF="4c1d902f26a0942cf5f6995eae6741d83b53ae50"
 REPOSITORY="STARLIGHT-code-X/eira-harness"
 SOURCE_URL="https://codeload.github.com/${REPOSITORY}/tar.gz/${SOURCE_REF}"
 TMP_ROOT=""
