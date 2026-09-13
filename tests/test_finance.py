@@ -58,6 +58,17 @@ class FinanceTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(HarnessError):
                 read_prices(raw)
 
+    def test_signal_exit_fees_latch_drawdown_stop(self):
+        result = backtest(prices([10, 11, 12, 12, 11.95, 11.9, 12, 13, 14, 15]),
+                          fast=1, slow=2, capital=10000, fee_bps=1000,
+                          slippage_bps=0, max_drawdown=.18)
+        self.assertGreater(result["metrics"]["max_drawdown"], .18)
+        self.assertTrue(result["metrics"]["risk_stop_triggered"])
+        self.assertEqual(result["metrics"]["orders"], 2)
+        self.assertEqual(result["trades"][-1]["reason"], "sma_signal")
+        self.assertEqual(result["trades"][-1]["date"], "2025-01-05")
+        self.assertEqual(len({row["equity"] for row in result["equity_curve"][4:]}), 1)
+
     def test_invalid_parameters_are_rejected(self):
         for kwargs in [{"fast": 30}, {"slow": 180}, {"capital": float("nan")},
                        {"exposure": 1.1}, {"fee_bps": -1}, {"fast": True},

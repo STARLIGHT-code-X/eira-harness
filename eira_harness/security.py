@@ -38,7 +38,11 @@ class Redactor:
 
 
 class Workspace:
-    BLOCKED = {".eira", ".git", ".ssh", ".aws", ".gnupg", ".kube", ".codex"}
+    BLOCKED = {
+        ".eira", ".git", ".hg", ".svn", ".bzr", ".ssh", ".aws", ".gnupg",
+        ".kube", ".codex", ".netrc", "_netrc", ".npmrc", ".pypirc", ".docker",
+        ".git-credentials", ".azure", ".gcloud", ".password-store",
+    }
 
     def __init__(self, root: Path):
         self.root = root.resolve(strict=True)

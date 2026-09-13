@@ -59,6 +59,18 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(HarnessError):
             self.workspace.read("b")
 
+    def test_common_credential_files_cannot_enter_tool_results(self):
+        for name in [".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials",
+                     ".docker/config.json", ".hg/hgrc", ".svn/wc.db",
+                     "nested/.npmrc", ".azure/accessTokens.json"]:
+            with self.subTest(name=name):
+                target = self.root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("private-test-credential")
+                with self.assertRaises(HarnessError):
+                    self.tools.call("read_file", {"path": name})
+                self.assertNotIn(name, self.tools.list_files()["files"])
+
     def test_default_policy_denies_writes(self):
         with self.assertRaises(HarnessError):
             self.tools.call("write_file", {"path": "x.txt", "content": "hello", "expected_sha256": "new"})

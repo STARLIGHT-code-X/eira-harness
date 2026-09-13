@@ -99,9 +99,11 @@ def backtest(text: str, fast: int = 10, slow: int = 30, capital: float = 10_000,
         peak = max(peak, equity)
         drawdown = 1 - equity / peak
         worst_drawdown = max(worst_drawdown, drawdown)
-        # Fees can also trigger a stop; close immediately, then remain in cash.
-        if quantity and drawdown >= max_drawdown:
-            sell(stamp, price, "drawdown_stop")
+        # Exit fees can breach the limit after a signal has already sold the
+        # position. Latch the stop even when already in cash to prevent reentry.
+        if drawdown >= max_drawdown:
+            if quantity:
+                sell(stamp, price, "drawdown_stop")
             halted = True
             equity = cash
             drawdown = 1 - equity / peak
