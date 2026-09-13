@@ -21,7 +21,7 @@ The initial goal is an inspectable, provider-configurable local harness that can
 1. Extend the v0.2 Alpha Vantage and Coinbase daily-price connectors with adjusted data and validation for splits, dividends, missing observations, and exchange calendars.
 2. More deterministic strategy families, parameter sweeps, walk-forward splits, turnover and exposure reporting, and out-of-sample evaluation.
 3. A persistent forward paper-trading service with event timestamps, replayable fills, and failure recovery.
-4. Only after validation: separately reviewed live execution adapters with broker-side limits and explicit authorization. This is not part of v0.2.
+4. Only after validation: separately reviewed live execution adapters with broker-side limits and explicit authorization. This is not part of v0.3.
 
 ## Operations
 

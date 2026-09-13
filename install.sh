@@ -5,7 +5,7 @@
 # The release process replaces RELEASE_COMMIT after the source commit exists.
 set -eu
 
-SOURCE_REF="4c1d902f26a0942cf5f6995eae6741d83b53ae50"
+SOURCE_REF="RELEASE_COMMIT"
 REPOSITORY="STARLIGHT-code-X/eira-harness"
 SOURCE_URL="https://codeload.github.com/${REPOSITORY}/tar.gz/${SOURCE_REF}"
 TMP_ROOT=""
@@ -242,13 +242,37 @@ elif [ -e "$BIN_DIR" ]; then
 else
     mkdir -p "$BIN_DIR"
 fi
+
+# macOS commonly uses a case-insensitive filesystem. Probe the actual bin
+# directory so Eira/eira never race over the same directory entry there.
+CASE_INSENSITIVE="$("$PYTHON" -I - "$BIN_DIR" <<'PY'
+import os
+import tempfile
+import sys
+directory = sys.argv[1]
+fd, path = tempfile.mkstemp(prefix=".eiraCaseProbe-", dir=directory)
+os.close(fd)
+try:
+    basename = os.path.basename(path)
+    alternate = os.path.join(directory, basename.replace("e", "E", 1))
+    print("1" if os.path.lexists(alternate) else "0")
+finally:
+    os.unlink(path)
+PY
+)"
 LAUNCHER="$BIN_DIR/eira"
-if [ -L "$LAUNCHER" ]; then
-    die "existing launcher is a symlink and will not be overwritten"
-elif [ -e "$LAUNCHER" ]; then
-    [ -f "$LAUNCHER" ] || die "existing launcher is not a regular file"
-    [ "$(sed -n '2p' "$LAUNCHER")" = "# EIRA_MANAGED_LAUNCHER v1" ] || die "existing launcher is unmanaged"
-fi
+UPPER_LAUNCHER="$BIN_DIR/Eira"
+check_launcher() {
+    launcher="$1"
+    if [ -L "$launcher" ]; then
+        die "existing launcher is a symlink and will not be overwritten: $launcher"
+    elif [ -e "$launcher" ]; then
+        [ -f "$launcher" ] || die "existing launcher is not a regular file: $launcher"
+        [ "$(sed -n '2p' "$launcher")" = "# EIRA_MANAGED_LAUNCHER v1" ] || die "existing launcher is unmanaged: $launcher"
+    fi
+}
+check_launcher "$LAUNCHER"
+[ "$CASE_INSENSITIVE" = 1 ] || check_launcher "$UPPER_LAUNCHER"
 
 RELEASES="$INSTALL_DIR/releases"
 if [ -L "$RELEASES" ]; then
@@ -301,17 +325,28 @@ VENV_PY="$STAGE_VENV/bin/python"
 # shebangs are never exposed as the public command.
 LAUNCHER_TMP="$BIN_DIR/.eira-launcher.$$"
 [ ! -e "$LAUNCHER_TMP" ] && [ ! -L "$LAUNCHER_TMP" ] || die "temporary launcher already exists"
-"$PYTHON" -I - "$LAUNCHER_TMP" "$CURRENT/bin/python" <<'PY'
+if [ "$CASE_INSENSITIVE" = 1 ]; then
+    UPPER_LAUNCHER="$LAUNCHER"
+    UPPER_LAUNCHER_TMP="$LAUNCHER_TMP"
+else
+    UPPER_LAUNCHER_TMP="$BIN_DIR/.Eira-launcher.$$"
+    [ ! -e "$UPPER_LAUNCHER_TMP" ] && [ ! -L "$UPPER_LAUNCHER_TMP" ] || die "temporary launcher already exists"
+fi
+"$PYTHON" -I - "$LAUNCHER_TMP" "$UPPER_LAUNCHER_TMP" "$CURRENT/bin/python" <<'PY'
 import os
 import shlex
 import sys
 
-target = sys.argv[2]
-path = sys.argv[1]
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    f.write("#!/bin/sh\n# EIRA_MANAGED_LAUNCHER v1\nset -eu\nPYTHONSAFEPATH=1 exec " + shlex.quote(target) + " -I -m eira_harness \"$@\"\n")
-os.chmod(path, 0o755)
+target = sys.argv[-1]
+seen = set()
+for path in sys.argv[1:-1]:
+    if not path or path in seen:
+        continue
+    seen.add(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\n# EIRA_MANAGED_LAUNCHER v1\nset -eu\nPYTHONSAFEPATH=1 exec " + shlex.quote(target) + " -I -m eira_harness \"$@\"\n")
+    os.chmod(path, 0o755)
 PY
 
 if [ -L "$RELEASES" ]; then
@@ -335,10 +370,94 @@ import os
 import sys
 os.replace(sys.argv[1], sys.argv[2])
 PY
-"$PYTHON" -I - "$LAUNCHER_TMP" "$LAUNCHER" <<'PY'
+if [ "$CASE_INSENSITIVE" = 1 ]; then
+    "$PYTHON" -I - "$LAUNCHER_TMP" "$LAUNCHER" <<'PY'
 import os
 import sys
 os.replace(sys.argv[1], sys.argv[2])
 PY
+else
+    "$PYTHON" -I - "$LAUNCHER_TMP" "$LAUNCHER" "$UPPER_LAUNCHER_TMP" "$UPPER_LAUNCHER" <<'PY'
+import os
+import sys
+os.replace(sys.argv[1], sys.argv[2])
+os.replace(sys.argv[3], sys.argv[4])
+PY
+fi
 
-printf '%s\n' "Eira installed. Run: $LAUNCHER --version" >&2
+setup_path() {
+    shell_name="${SHELL:-}"
+    shell_name="${shell_name##*/}"
+    case "$shell_name" in
+        bash|zsh)
+            path_file="${ZDOTDIR:-$HOME}/.zshrc"
+            [ "$shell_name" = "bash" ] && path_file="$HOME/.bashrc"
+            path_style="posix"
+            ;;
+        fish)
+            path_file="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+            path_style="fish"
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+    "$PYTHON" -I - "$path_file" "$BIN_DIR" "$path_style" <<'PY'
+import os
+import shlex
+import sys
+
+path_file, bin_dir, style = sys.argv[1:]
+current = os.path.abspath(path_file)
+parts = current.split(os.sep)
+component = os.sep
+for part in parts:
+    if not part:
+        continue
+    component = os.path.join(component, part)
+    if os.path.islink(component):
+        raise SystemExit("shell configuration path contains a symlink")
+
+parent = os.path.dirname(current)
+os.makedirs(parent, exist_ok=True)
+if os.path.lexists(current) and os.path.islink(current):
+    raise SystemExit("shell configuration file is a symlink")
+text = ""
+if os.path.exists(current):
+    if not os.path.isfile(current):
+        raise SystemExit("shell configuration path is not a regular file")
+    metadata = os.stat(current)
+    if metadata.st_nlink != 1:
+        raise SystemExit("shell configuration file has multiple hard links")
+    if metadata.st_size > 1024 * 1024:
+        raise SystemExit("shell configuration file is larger than 1 MiB")
+    with open(current, encoding="utf-8") as config:
+        text = config.read()
+if "# EIRA_PATH_START v1" not in text:
+    separator = "\n" if text and not text.endswith("\n") else ""
+    quoted = shlex.quote(bin_dir)
+    if style == "fish":
+        block = "# EIRA_PATH_START v1\nif not contains -- " + quoted + " $PATH\n    set -gx PATH " + quoted + " $PATH\nend\n# EIRA_PATH_END v1\n"
+    else:
+        block = "# EIRA_PATH_START v1\ncase :${PATH:-}: in\n    *:" + quoted + ":*) ;;\n    *) export PATH=" + quoted + ':"${PATH:-}" ;;\nesac\n# EIRA_PATH_END v1\n'
+    with open(current, "a", encoding="utf-8") as config:
+        config.write(separator + block)
+PY
+    return $?
+}
+
+PATH_SETUP_STATUS=0
+setup_path || PATH_SETUP_STATUS=$?
+if [ "$PATH_SETUP_STATUS" -eq 1 ]; then
+    die "could not update the shell PATH configuration"
+fi
+printf '%s\n' "Eira installed. Run: $LAUNCHER --version (or $UPPER_LAUNCHER --version)" >&2
+if [ "$PATH_SETUP_STATUS" -eq 0 ]; then
+    printf '%s\n' "PATH setup added for ${shell_name}. To use it in this terminal, run:" >&2
+else
+    printf '%s\n' "Add this directory to your shell PATH:" >&2
+fi
+case "$shell_name" in
+    fish) printf '  set -gx PATH %s $PATH\n' "$("$PYTHON" -I -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$BIN_DIR")" >&2 ;;
+    *) printf '  export PATH=%s:"$PATH"\n' "$("$PYTHON" -I -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$BIN_DIR")" >&2 ;;
+esac

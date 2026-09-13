@@ -32,6 +32,11 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           "$RUNNER_TEMP/eira-venv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -v
+      - name: Verify both command names
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/eira-venv/bin/Eira" --version
+          "$RUNNER_TEMP/eira-venv/bin/eira" --version
       - name: Run installed demo
         working-directory: ${{ runner.temp }}
         run: |

@@ -4,7 +4,7 @@
 
 Eira gives a tool-capable language model a working directory, an execution loop, durable sessions, reviewed file edits, and financial research tools. You choose the model and endpoint. Conversations and tool traces stay in a local SQLite database; relevant conversation content is sent to the model endpoint you configure.
 
-This is a working **v0.2 developer release**, inspired by the general-agent and financial-workflow scope of Minara Harness. It is independently implemented. It does not claim Minara feature parity or benchmark superiority.
+This is a working **v0.3 developer release**, inspired by the general-agent and financial-workflow scope of Minara Harness. It is independently implemented. It does not claim Minara feature parity or benchmark superiority.
 
 ```text
 EIRA / offline-scripted-demo
@@ -26,10 +26,42 @@ Requires **Python 3.11+ on Linux, macOS, or WSL**:
 ```bash
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   https://raw.githubusercontent.com/STARLIGHT-code-X/eira-harness/main/install.sh | sh
-~/.local/bin/eira --version
+export PATH="$HOME/.local/bin:$PATH"
+Eira
 ```
 
-The installer downloads a pinned source commit and installs into your own Python environment under `~/.local/share/eira`. It requires no sudo. Add `~/.local/bin` to `PATH` if it is not already present. To inspect the installer first, download it to a file and read it before running `sh install.sh`. See [installation and upgrades](docs/INSTALL.md).
+The installer downloads a pinned source commit and installs into your own Python environment under `~/.local/share/eira`. It requires no sudo. The installer adds its command directory to supported bash, zsh, or fish startup files. Open a new terminal, or use the printed PATH command in your current terminal. Both `Eira` and `eira` work. To inspect the installer first, download it to a file and read it before running `sh install.sh`. See [installation and upgrades](docs/INSTALL.md).
+
+## Open your coding workspace
+
+```bash
+cd /path/to/project
+Eira
+```
+
+No subcommand is required. On first launch, choose a provider and paste its tool-capable model ID. Eira remembers your provider, model, and optional endpoint in your user configuration directory. If a key is needed, enter it at the hidden prompt for this process or provide the provider's environment variable. Keys are never saved by setup.
+
+The terminal has a frost-and-lavender welcome panel, workspace and permission context, arrow-key input history, tool progress, model timing, and saved conversations. `NO_COLOR` disables styling. Use `Eira setup` to configure preferences separately.
+
+| Command | Action |
+|---|---|
+| `/help` | Show chat commands |
+| `/model` / `/provider` | Choose a model or provider interactively |
+| `/new` | Start a fresh conversation |
+| `/sessions` / `/resume ID` | Find and resume workspace conversations |
+| `/status` | Show the current endpoint and permissions |
+| `/clear` | Clear the display while retaining history |
+| `/exit` | Leave chat |
+
+Ctrl+C during a task interrupts it and returns to the prompt; Ctrl+C at the prompt exits. Existing tool approval rules remain in effect. Switching providers retains the conversation and sends that history to the newly selected endpoint on your next task; use `/new` for a fresh conversation.
+
+```bash
+Eira --read-only                       # open chat with writes denied
+Eira --shell docker                    # approved commands in Docker
+Eira run 'Explain this project.'       # one task, also usable in scripts
+```
+
+This interface is an improvement to Eira's local harness. Streaming model tokens, a full-screen editor, automatic context compaction, MCP, and coding-agent benchmark parity are not included in this release.
 
 ## Try it immediately
 
@@ -209,7 +241,7 @@ The tests cover financial accounting, lagged signals, risk stops, permissions, p
 
 Read [the architecture and extension guide](docs/ARCHITECTURE.md) and [security boundaries](docs/SECURITY.md) before adding powerful tools.
 
-See [the v0.2 changes](docs/RELEASE-0.2.md) for the audit remediation summary.
+See [the v0.3 terminal changes](docs/RELEASE-0.3.md) and [the v0.2 changes](docs/RELEASE-0.2.md) for the audit remediation summary.
 
 ## License
 

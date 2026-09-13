@@ -52,14 +52,14 @@ import zipfile
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
-    name = "eira_harness-0.1.0-py3-none-any.whl"
-    dist_info = "eira_harness-0.1.0.dist-info"
+    name = "eira_harness-0.3.0-py3-none-any.whl"
+    dist_info = "eira_harness-0.3.0.dist-info"
     root = Path(__file__).parent
     target = Path(wheel_directory) / name
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as wheel:
         for path in sorted((root / "eira_harness").rglob("*.py")):
             wheel.write(path, path.relative_to(root).as_posix())
-        wheel.writestr(dist_info + "/METADATA", "Metadata-Version: 2.1\nName: eira-harness\nVersion: 0.1.0\n\n")
+        wheel.writestr(dist_info + "/METADATA", "Metadata-Version: 2.1\nName: eira-harness\nVersion: 0.3.0\n\n")
         wheel.writestr(dist_info + "/WHEEL", "Wheel-Version: 1.0\nGenerator: installer-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
         wheel.writestr(dist_info + "/entry_points.txt", "[console_scripts]\neira = eira_harness.cli:main\n")
         wheel.writestr(dist_info + "/RECORD", "")
@@ -74,6 +74,9 @@ class InstallerTests(unittest.TestCase):
             EIRA_INSTALL_ARCHIVE=str(archive),
             EIRA_INSTALL_DIR=str(install),
             EIRA_BIN_DIR=str(bindir),
+            HOME=str(bindir.parent / "home"),
+            XDG_CONFIG_HOME=str(bindir.parent / "xdg-config"),
+            SHELL="/bin/bash",
         )
         return subprocess.run(
             ["sh", str(INSTALLER)],
@@ -104,6 +107,19 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(version.returncode, 0, version.stderr)
             self.assertIn("Eira ", version.stdout)
             self.assertTrue((install / "current" / "bin" / "python").exists())
+            upper = subprocess.run(
+                [str(bindir / "Eira"), "--version"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(upper.returncode, 0, upper.stderr)
+            bashrc = bindir.parent / "home" / ".bashrc"
+            self.assertEqual(bashrc.read_text(encoding="utf-8").count("# EIRA_PATH_START v1"), 1)
+            second = self.run_installer(archive, install, bindir)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(bashrc.read_text(encoding="utf-8").count("# EIRA_PATH_START v1"), 1)
 
     def test_invalid_upgrade_preserves_previous_release(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -153,6 +169,20 @@ class InstallerTests(unittest.TestCase):
             result = self.run_installer(archive, install, bindir)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(launcher.read_text(encoding="utf-8"), "#!/bin/sh\nexit 99\n")
+
+    def test_unmanaged_uppercase_launcher_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temp = Path(temporary)
+            archive = temp / "source.tar.gz"
+            install = temp / "share" / "eira"
+            bindir = temp / "bin"
+            bindir.mkdir(parents=True)
+            launcher = bindir / "Eira"
+            launcher.write_text("#!/bin/sh\nexit 98\n", encoding="utf-8")
+            make_archive(ROOT, archive)
+            result = self.run_installer(archive, install, bindir)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(launcher.read_text(encoding="utf-8"), "#!/bin/sh\nexit 98\n")
 
     def test_symlink_destination_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -10,21 +10,28 @@ curl -fsSL https://raw.githubusercontent.com/STARLIGHT-code-X/eira-harness/main/
 The installer downloads a tarball for a full, immutable source commit, checks
 the archive before extraction, creates a private virtual environment, and
 activates a release only after the package has installed and imported
-successfully. The public `eira` launcher executes the persistent environment
-with `python -m eira_harness`.
+successfully. The public `eira` and `Eira` launchers execute the persistent
+environment with `python -m eira_harness`.
 
 Python 3.11 or newer is required. The installer looks for `python3.14`,
 `python3.13`, `python3.12`, `python3.11`, and then `python3` in that order.
 
 By default, the managed environment is stored in `~/.local/share/eira` and the
-launcher is written to `~/.local/bin/eira`. Use these variables for an isolated
-installation or a package manager sandbox:
+launchers are written to `~/.local/bin/eira` and `~/.local/bin/Eira`. For bash,
+zsh, and fish, the installer adds an idempotent managed PATH block to the
+current shell's configuration file. Reload that file, or run the printed PATH
+command in the current terminal, then either `Eira` or `eira` will work.
+
+Use these variables for an isolated installation or a package manager sandbox:
 
 ```sh
 EIRA_INSTALL_DIR="$PWD/.eira-install" \
 EIRA_BIN_DIR="$PWD/.eira-bin" \
   sh install.sh
 ```
+
+The installer never replaces an existing unmanaged launcher, including an
+existing `Eira` alias. It also rejects symlinked destination paths.
 
 An existing managed installation is upgraded atomically. An existing
 installation directory or launcher that is not marked as managed is left

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eira-harness"
-version = "0.2.0"
+version = "0.3.0"
 description = "A local, inspectable agent harness for coding and financial research"
 requires-python = ">=3.11"
 dependencies = []
@@ -13,6 +13,7 @@ license = "MIT"
 
 [project.scripts]
 eira = "eira_harness.cli:main"
+Eira = "eira_harness.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["eira_harness*"]

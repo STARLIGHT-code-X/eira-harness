@@ -63,9 +63,9 @@ def build_parser():
 
     def model_options(command):
         workspace(command)
-        command.add_argument("--model", default=os.getenv("EIRA_MODEL", ""))
-        command.add_argument("--provider", choices=["openai", "anthropic", "openrouter", "gemini", "ollama", "custom"], default=os.getenv("EIRA_PROVIDER", "openai"))
-        command.add_argument("--base-url", default=os.getenv("EIRA_BASE_URL") or None)
+        command.add_argument("--model", default=None)
+        command.add_argument("--provider", choices=["openai", "anthropic", "openrouter", "gemini", "ollama", "custom"], default=None)
+        command.add_argument("--base-url", default=None)
         command.add_argument("--allow-data-source", action="append", choices=["alphavantage", "coinbase"], default=[], help="Preapprove a native daily-price source")
         command.add_argument("--session", help="Resume a session from this workspace")
         command.add_argument("--read-only", action="store_true", help="Deny file writes, memory writes, and shell calls")
@@ -84,6 +84,8 @@ def build_parser():
     model_options(run)
     chat = sub.add_parser("chat", help="Start an interactive conversation")
     model_options(chat)
+    setup = sub.add_parser("setup", help="Configure your default model interactively")
+    model_options(setup)
     init = sub.add_parser("init", help="Initialize workspace state and EIRA.md")
     workspace(init)
     demo = sub.add_parser("demo", help="Run a scripted offline demo on synthetic prices")
@@ -119,44 +121,171 @@ def build_parser():
     return parser
 
 
+def configure_model(args, ui, force=False, choose_provider=True):
+    """Explicit terminal setup; save preferences, never an API key or authority."""
+    import getpass
+    from .provider import PROFILES, _same_base_url, _model_name, _validate_endpoint
+    from .settings import save_settings
+    def ask(label):
+        print(clean_terminal(Redactor()(label)), end="", file=sys.stderr, flush=True)
+        return input().strip()
+
+    selected, model, endpoint = args.provider, args.model, args.base_url
+    if force or not model:
+        ui.notice('Model setup · choose a tool-capable model from your provider.')
+        if choose_provider:
+            names = list(PROFILES)
+            ui.notice('\n'.join(f'  {i + 1}. {PROFILES[name]["label"]}' for i, name in enumerate(names)))
+            answer = ask(f'Provider [{selected}]: ').lower()
+            if answer:
+                candidate = names[int(answer) - 1] if answer.isdigit() and 1 <= int(answer) <= len(names) else answer
+                if candidate not in PROFILES:
+                    raise HarnessError('Choose a listed provider name or number.')
+                if candidate != selected:
+                    model, endpoint = '', None
+                selected = candidate
+        if selected == 'custom':
+            endpoint = ask(f'Base URL [{endpoint or "https://your-server/v1"}]: ') or endpoint
+            if not endpoint:
+                raise HarnessError('A custom endpoint is required.')
+        ui.notice('Paste the exact model ID shown by your provider. Local models must support tools.')
+        model = ask(f'Model ID{f" [{model}]" if model else ""}: ') or model
+    _model_name(model)
+    profile = PROFILES[selected]
+    url = endpoint or profile['default_base_url']
+    _validate_endpoint(url)
+    standard = bool(profile['default_base_url'] and _same_base_url(url, profile['default_base_url']))
+    key_env = profile['api_key_env'] if standard else 'EIRA_API_KEY'
+    ui.notice(f'Endpoint: {url}\nConversation and tool results are sent to this endpoint when you submit a task.')
+    if not os.getenv(key_env) and (profile['requires_api_key'] or selected == 'custom'):
+        ui.notice(f'{key_env} is not set. Enter it privately for this process; it will not be saved.')
+        key = getpass.getpass(f'{key_env} (Enter to skip): ')
+        if key:
+            os.environ[key_env] = key
+    provider = build_provider(selected, model, endpoint)
+    save_settings(selected, model, endpoint)
+    args.provider, args.model, args.base_url = selected, model, endpoint
+    ui.notice('Model preferences saved. API keys are read from the environment or entered privately each launch.')
+    return provider
+
+
 def run_agent(args, store, workspace):
     if args.read_only and args.approve_writes:
-        raise HarnessError("Choose either --read-only or --approve-writes.")
-    provider = build_provider(args.provider, args.model, args.base_url)
+        raise HarnessError('Choose either --read-only or --approve-writes.')
+    interactive = args.command == 'chat'
+    if interactive and not sys.stdin.isatty():
+        raise HarnessError('Chat requires an interactive terminal; use Eira run "your task" for scripts.')
+    ui = None
+    if interactive:
+        from .terminal import Terminal
+        ui = Terminal()
+    session = args.session or store.create(args.prompt if not interactive else 'Interactive session')
+    store.require(session)
     policy = Policy(approve=approve, approve_writes=args.approve_writes, read_only=args.read_only,
                     allowed_hosts={h.lower() for h in args.allow_host}, shell_mode=args.shell,
                     docker_image=args.docker_image, allowed_data_sources=set(args.allow_data_source))
-    session = args.session or store.create(args.prompt if args.command == "run" else "Interactive session")
-    toolbox = Toolbox(workspace, store, policy, session)
-    agent = Agent(provider, store, toolbox, renderer(args.json), Limits(
-        max_steps=args.max_steps, max_tool_calls=args.max_tool_calls,
-        max_context_chars=args.max_context_chars, max_total_tokens=args.max_tokens))
-    if args.command == "run":
-        return 0 if agent.run(args.prompt)["status"] == "completed" else 3
-    if not sys.stdin.isatty():
-        raise HarnessError("chat requires an interactive terminal; use run for scripts.")
-    print_safe("Eira · /exit to leave · session " + session)
+    limits = Limits(max_steps=args.max_steps, max_tool_calls=args.max_tool_calls,
+                    max_context_chars=args.max_context_chars, max_total_tokens=args.max_tokens)
+    provider = None
+
+    def banner():
+        ui.banner(workspace.root, args.provider, args.model or 'Not configured', session,
+                  read_only=args.read_only, shell=args.shell)
+        if args.approve_writes:
+            ui.notice('Workspace file and memory writes are preapproved for this session.')
+
+    if interactive:
+        banner()
+        try:
+            if not args.model:
+                provider = configure_model(args, ui)
+            else:
+                try:
+                    provider = build_provider(args.provider, args.model, args.base_url)
+                except HarnessError:
+                    provider = configure_model(args, ui)
+        except HarnessError as exc:
+            ui.error(str(exc))
+            ui.notice('Use /model to finish setup, /help for commands, or /exit to leave.')
+        store.redact = Redactor()
+    else:
+        provider = build_provider(args.provider, args.model, args.base_url)
+
+    def make_agent():
+        return Agent(provider, store, Toolbox(workspace, store, policy, session),
+                     renderer(True) if args.json else (ui.emit if ui else renderer(False)), limits)
+
+    if not interactive:
+        return 0 if make_agent().run(args.prompt)['status'] == 'completed' else 3
     while True:
         try:
-            print("\nyou › ", end="", file=sys.stderr, flush=True)
-            prompt = input().strip()
-        except EOFError:
+            prompt = ui.prompt().strip()
+        except (EOFError, KeyboardInterrupt):
+            ui.notice('Session saved. See you soon.')
             break
-        if prompt in {"/exit", "/quit"}:
-            break
+        except HarnessError as exc:
+            ui.error(str(exc))
+            continue
         if not prompt:
             continue
+        parts = prompt.split(maxsplit=1)
+        command = parts[0].lower()
+        argument = parts[1].strip() if len(parts) > 1 else ''
         try:
-            agent.run(prompt)
-        except HarnessError as exc:
-            if args.json:
-                print(json.dumps({"event": "error", "error": store.redact(str(exc))}))
+            if command in {'/exit', '/quit'}:
+                ui.notice('Session saved. See you soon.')
+                break
+            if command == '/help':
+                ui.help()
+            elif command == '/status':
+                banner()
+                from .provider import PROFILES
+                ui.notice(f'Endpoint: {args.base_url or PROFILES[args.provider]["default_base_url"]}')
+                ui.notice(f'Writes: {"denied" if args.read_only else "preapproved" if args.approve_writes else "ask first"}\n'
+                          f'Hosts: {", ".join(args.allow_host) or "ask first"}\n'
+                          f'Data sources: {", ".join(args.allow_data_source) or "ask first"}')
+            elif command == '/sessions':
+                recent = store.sessions()[:20]
+                ui.notice('\n'.join(f'{s["id"]}  {s["title"]}' for s in recent) or 'No saved sessions.')
+                ui.notice('Resume with /resume SESSION_ID')
+            elif command == '/resume':
+                store.require(argument)
+                session = argument
+                banner()
+                ui.notice('Conversation resumed with your current permissions and model.')
+            elif command == '/new':
+                session = store.create('Interactive session')
+                banner()
+            elif command in {'/model', '/provider'}:
+                # Switching is explicit; old session history is retained and shown by /status.
+                provider = configure_model(args, ui, force=True, choose_provider=command == '/provider')
+                store.redact = Redactor()
+                banner()
+            elif command == '/clear':
+                if sys.stderr.isatty() and os.getenv('TERM') != 'dumb':
+                    print('\033[2J\033[H', end='', file=sys.stderr, flush=True)
+                banner()
+                ui.notice('Display cleared; conversation history is retained. /new starts a fresh session.')
+            elif command.startswith('/'):
+                ui.error('Unknown command. Type /help for available commands.')
             else:
-                print_safe(str(exc), file=sys.stderr)
+                if provider is None:
+                    provider = configure_model(args, ui)
+                    store.redact = Redactor()
+                make_agent().run(prompt)
+        except KeyboardInterrupt:
+            ui.notice('Task interrupted. History is saved; unfinished tool outcomes may be unknown.')
+        except (HarnessError, OSError, ValueError) as exc:
+            ui.error(str(exc))
+        finally:
+            store.redact = Redactor()
     return 0
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or (argv[0].startswith("-") and argv[0] not in {"-h", "--help", "--version"}):
+        argv.insert(0, "chat")
     args = build_parser().parse_args(argv)
     store = None
     try:
@@ -168,9 +297,13 @@ def main(argv=None):
             args.workspace.mkdir(parents=True, exist_ok=True)
         workspace = Workspace(args.workspace)
         if args.command == "doctor":
+            from .provider import PROFILES
+            from .settings import resolve_settings
+            selected = resolve_settings(argparse.Namespace(provider=None, model=None, base_url=None))
+            key_env = PROFILES[selected.provider]["api_key_env"] if not selected.base_url else "EIRA_API_KEY"
             report = {"version": __version__, "python": sys.version.split()[0],
-                      "workspace": str(workspace.root), "model": os.getenv("EIRA_MODEL") or "not configured",
-                      "api_key_present": bool(os.getenv("EIRA_API_KEY") or os.getenv("OPENAI_API_KEY")),
+                      "workspace": str(workspace.root), "model": selected.model or "not configured",
+                      "provider": selected.provider, "api_key_present": bool(os.getenv(key_env)),
                       "docker_available": bool(shutil.which("docker")),
                       "session_lock_supported": os.name == "posix",
                       "live_provider_tested": False}
@@ -206,6 +339,15 @@ def main(argv=None):
             else:
                 print_safe(json.dumps(result, indent=2, allow_nan=False))
             return 0
+        if args.command in {"run", "chat", "setup"}:
+            from .settings import resolve_settings
+            resolve_settings(args)
+        if args.command == "setup":
+            from .terminal import Terminal
+            if not sys.stdin.isatty():
+                raise HarnessError("setup requires an interactive terminal.")
+            configure_model(args, Terminal(), force=True)
+            return 0
         store = Store(workspace.root)
         if args.command == "init":
             target = workspace.path("EIRA.md")
@@ -233,6 +375,9 @@ def main(argv=None):
             print_safe(json.dumps(store.memories(), indent=2))
         else:
             return run_agent(args, store, workspace)
+        return 0
+    except EOFError:
+        print_safe("Setup closed. Run Eira again when ready.", file=sys.stderr)
         return 0
     except KeyboardInterrupt:
         print_safe("Interrupted. Any started session was saved; in-flight tool outcomes may be unknown.", file=sys.stderr)

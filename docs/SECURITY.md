@@ -31,3 +31,9 @@ Financial adapters only retrieve daily prices from fixed sources. They do not pl
 ## Reporting
 
 Report suspected issues privately to the repository owner. Do not include real credentials or private traces in public issues. The owner may enable GitHub private vulnerability reporting for coordinated reports.
+
+## Interactive configuration
+
+Eira 0.3 saves only provider, model, and optional base URL under `$XDG_CONFIG_HOME/eira/settings.json` (default `~/.config/eira/settings.json`), with user-only permissions. This file never grants tool permissions or stores API keys. Setup accepts credentials through a hidden prompt for the current process; environment variables remain supported. Treat user configuration as trusted local state. The normal workspace file tools protect the configuration directory.
+
+The installer creates both `Eira` and `eira` commands and adds the command directory to supported shell startup files. It reports the path setup and preserves unmanaged commands. Terminal input history is process-local, capped at 100 entries, and redacts recognized credentials; no readline history file is written.
