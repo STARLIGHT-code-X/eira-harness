@@ -42,6 +42,8 @@ class Store:
                 kind TEXT NOT NULL, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS memory (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS session_context (
+                session TEXT PRIMARY KEY, system TEXT NOT NULL, digest TEXT NOT NULL);
         """)
 
     def close(self):
@@ -101,6 +103,28 @@ class Store:
         self.require(session)
         return [json.loads(row[0]) for row in self.db.execute(
             "SELECT payload FROM messages WHERE session=? ORDER BY seq", (session,))]
+
+    def model_messages(self, session: str) -> list[dict]:
+        """Messages the model sees: everything since the latest compaction summary.
+
+        Compaction never deletes history. Earlier messages stay in the journal
+        and in traces; only the model's view starts at the summary.
+        """
+        history = self.messages(session)
+        for index in range(len(history) - 1, -1, -1):
+            if "eira_compaction" in history[index]:
+                return history[index:]
+        return history
+
+    def session_context(self, session: str) -> dict | None:
+        row = self.db.execute("SELECT system, digest FROM session_context WHERE session=?", (session,)).fetchone()
+        return dict(row) if row else None
+
+    def set_session_context(self, session: str, system: str, digest: str):
+        self.require(session)
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO session_context VALUES (?,?,?)",
+                            (session, self.redact(system), digest))
 
     def event(self, session: str, kind: str, payload: dict):
         with self.db:

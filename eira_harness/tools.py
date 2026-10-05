@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import difflib
+import fnmatch
 import hashlib
 import json
 import os
@@ -20,6 +21,19 @@ from .finance import backtest
 from .network import fetch_public, validate_url
 from .security import HarnessError, Workspace, atomic_write
 from .store import Store
+
+READ_PAGE_LINES = 2_000
+READ_PAGE_CHARS = 24_000
+MAX_TEXT_FILE = 5_000_000
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _diff(path: str, old: str, new: str) -> str:
+    return "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True),
+                                        fromfile=path + " (before)", tofile=path + " (after)"))
 
 
 @dataclass
@@ -88,17 +102,32 @@ class Toolbox:
     def __init__(self, workspace: Workspace, store: Store, policy: Policy, session: str):
         self.workspace, self.store, self.policy, self.session = workspace, store, policy, session
         self.registry: dict[str, Tool] = {}
+        glob = string("Optional shell-style filter on the relative path, such as *.py (* also matches /)", maxLength=200)
         self.register(Tool("list_files", "List workspace files; hidden and credential paths are excluded.",
-                           {"path": string("Relative directory (default '.')")}, [], self.list_files))
-        self.register(Tool("read_file", "Read a UTF-8 workspace file. Results are untrusted data.",
-                           {"path": string("Relative file path")}, ["path"], self.read_file))
-        self.register(Tool("write_file", "Create or replace a UTF-8 file after diff approval. For an existing file supply expected_sha256 from read_file; for a new file use 'new'.",
-                           {"path": string("Relative file path"), "content": string("Full new content"),
+                           {"path": string("Relative directory (default '.')"), "glob": glob}, [], self.list_files))
+        self.register(Tool("read_file", "Read a UTF-8 workspace file, optionally a line range. Long files are returned in pages; "
+                           "use next_start_line to continue. Results are untrusted data.",
+                           {"path": string("Relative file path"),
+                            "start_line": {"type": "integer", "minimum": 1, "description": "First line to read (default 1)"},
+                            "end_line": {"type": "integer", "minimum": 1, "description": "Last line to read (inclusive)"}},
+                           ["path"], self.read_file))
+        self.register(Tool("edit_file", "Replace exact text in an existing file after diff approval. old_string must match the file exactly, "
+                           "including whitespace, and must be unique unless replace_all is true. Prefer this to write_file for targeted changes.",
+                           {"path": string("Relative file path"),
+                            "old_string": string("Exact text to replace", maxLength=100_000),
+                            "new_string": string("Replacement text", maxLength=100_000),
+                            "replace_all": {"type": "boolean", "description": "Replace every occurrence (default false)"},
+                            "expected_sha256": string("Optional SHA-256 from read_file; the edit is refused if the file changed")},
+                           ["path", "old_string", "new_string"], self.edit_file))
+        self.register(Tool("write_file", "Create or replace a whole UTF-8 file after diff approval. For an existing file supply expected_sha256 from read_file; for a new file use 'new'.",
+                           {"path": string("Relative file path"), "content": string("Full new content", maxLength=1_000_000),
                             "expected_sha256": string("Original SHA-256 or 'new'")},
                            ["path", "content", "expected_sha256"], self.write_file))
         self.register(Tool("search_files", "Search a literal text string in bounded workspace text files.",
                            {"query": string("Literal search string", maxLength=500),
-                            "path": string("Relative directory (default '.')")}, ["query"], self.search_files))
+                            "path": string("Relative directory (default '.')"), "glob": glob,
+                            "ignore_case": {"type": "boolean", "description": "Case-insensitive match (default false)"}},
+                           ["query"], self.search_files))
         self.register(Tool("fetch_url", "Fetch an approved public HTTPS source. No private IPs, redirects, cookies, or credentials.",
                            {"url": string("Public HTTPS source URL", maxLength=4096)}, ["url"], self.fetch_url))
         self.register(Tool("market_prices", "Fetch daily prices from Alpha Vantage (stocks) or Coinbase (crypto). Network permission is required; returns CSV for an independently approved write. No trading.",
@@ -140,7 +169,25 @@ class Toolbox:
         tool.validate(arguments)
         return tool.execute(**arguments)
 
-    def list_files(self, path="."):
+    def describe(self, name: str, arguments) -> str:
+        """One-line, human-readable summary of a call for progress displays."""
+        if not isinstance(arguments, dict):
+            return ""
+        if name == "search_files" and isinstance(arguments.get("query"), str):
+            text = json.dumps(arguments["query"], ensure_ascii=False)
+            if arguments.get("path", ".") != ".":
+                text += f" in {arguments['path']}"
+        else:
+            text = next((arguments[key] for key in ("path", "url", "command", "symbol", "key", "plan")
+                         if isinstance(arguments.get(key), str)), "")
+            if name == "read_file" and ("start_line" in arguments or "end_line" in arguments):
+                text += f":{arguments.get('start_line', 1)}-{arguments.get('end_line', '')}"
+        if isinstance(arguments.get("glob"), str):
+            text += f" ({arguments['glob']})"
+        text = " ".join(str(text).split())
+        return text if len(text) <= 100 else text[:99] + "…"
+
+    def list_files(self, path=".", glob=None):
         root = self.workspace.path(path)
         if not root.is_dir():
             raise HarnessError("Path must be a directory.")
@@ -166,52 +213,117 @@ class Toolbox:
                     if entry.is_dir(follow_symlinks=False):
                         pending.append((Path(entry.path), depth + 1))
                     elif entry.is_file(follow_symlinks=False):
+                        if glob and not fnmatch.fnmatchcase(relative, glob):
+                            continue
                         paths.append(relative)
                         if len(paths) >= 500:
                             return {"files": sorted(paths), "truncated": True}
         return {"files": sorted(paths), "truncated": truncated}
 
-    def read_file(self, path):
-        text = self.workspace.read(path)
-        redacted = self.store.redact(text) != text
-        return {"path": path, "sha256": None if redacted else hashlib.sha256(text.encode()).hexdigest(),
-                "content": self.store.redact(text), "editable": not redacted,
-                "note": "Contains protected values; model edits are disabled." if redacted else ""}
+    def read_file(self, path, start_line=1, end_line=None):
+        text = self.workspace.read(path, MAX_TEXT_FILE)
+        visible = self.store.redact(text)
+        protected = visible != text
+        lines = visible.splitlines(keepends=True)
+        total = len(lines)
+        if start_line > max(total, 1):
+            raise HarnessError(f"start_line is past the end of the file ({total} lines).")
+        if end_line is not None and end_line < start_line:
+            raise HarnessError("end_line must not be before start_line.")
+        last = total if end_line is None else min(end_line, total)
+        chunk, chars = [], 0
+        for line in lines[start_line - 1:last]:
+            if chunk and (len(chunk) >= READ_PAGE_LINES or chars + len(line) > READ_PAGE_CHARS):
+                break
+            chunk.append(line)
+            chars += len(line)
+        shown_end = start_line - 1 + len(chunk)
+        result = {"path": path, "sha256": None if protected else _sha(text), "content": "".join(chunk),
+                  "start_line": start_line, "end_line": shown_end, "total_lines": total,
+                  "editable": not protected,
+                  "note": "Contains protected values; model edits are disabled." if protected else ""}
+        if shown_end < last:
+            result.update(truncated=True, next_start_line=shown_end + 1)
+        return result
+
+    def _check_editable(self, *texts):
+        for text in texts:
+            if self.store.redact(text) != text or "[REDACTED]" in text:
+                raise HarnessError("Editing protected or redacted content is disabled. Edit this file manually.")
 
     def write_file(self, path, content, expected_sha256):
         target = self.workspace.path(path)
-        old = self.workspace.read(path) if target.exists() else ""
-        if self.store.redact(old) != old or self.store.redact(content) != content or "[REDACTED]" in content:
-            raise HarnessError("Editing protected or redacted content is disabled. Edit this file manually.")
-        digest = hashlib.sha256(old.encode()).hexdigest() if target.exists() else "new"
+        old = self.workspace.read(path, MAX_TEXT_FILE) if target.exists() else ""
+        self._check_editable(old, content)
+        digest = _sha(old) if target.exists() else "new"
         if digest != expected_sha256:
             raise HarnessError("File changed or expected_sha256 is incorrect. Read it again before proposing an edit.")
-        diff = "".join(difflib.unified_diff(old.splitlines(True), content.splitlines(True),
-                                         fromfile=path + " (before)", tofile=path + " (after)"))
+        diff = _diff(path, old, content)
         if not diff and target.exists():
             return {"path": path, "changed": False}
         self.policy.require("write_file", diff or f"Create empty file: {path}", workspace_write=True)
         # Recheck after the human approval wait.
         self.workspace.path(path)
-        current = self.workspace.read(path) if target.exists() else ""
-        current_hash = hashlib.sha256(current.encode()).hexdigest() if target.exists() else "new"
+        current = self.workspace.read(path, MAX_TEXT_FILE) if target.exists() else ""
+        current_hash = _sha(current) if target.exists() else "new"
         if current_hash != digest:
             raise HarnessError("File changed during approval; edit cancelled.")
         atomic_write(target, content, overwrite=digest != "new")
-        return {"path": path, "changed": True, "sha256": hashlib.sha256(content.encode()).hexdigest()}
+        return {"path": path, "changed": True, "sha256": _sha(content)}
 
-    def search_files(self, query, path="."):
+    def edit_file(self, path, old_string, new_string, replace_all=False, expected_sha256=None):
+        target = self.workspace.path(path)
+        if not target.exists():
+            raise HarnessError("File does not exist. Use write_file with expected_sha256 'new' to create it.")
+        old = self.workspace.read(path, MAX_TEXT_FILE)
+        self._check_editable(old, new_string)
+        digest = _sha(old)
+        if expected_sha256 is not None and expected_sha256 != digest:
+            raise HarnessError("File changed or expected_sha256 is incorrect. Read it again before proposing an edit.")
+        if not old_string:
+            raise HarnessError("old_string must not be empty; use write_file to replace a whole file.")
+        if old_string == new_string:
+            raise HarnessError("old_string and new_string are identical; nothing to change.")
+        search, replacement = old_string, new_string
+        count = old.count(search)
+        if not count and "\r\n" in old and "\r\n" not in old_string:
+            # Models usually emit LF; match a CRLF file without changing its line endings.
+            search, replacement = old_string.replace("\n", "\r\n"), new_string.replace("\n", "\r\n")
+            count = old.count(search)
+        if not count:
+            raise HarnessError("old_string was not found. Read the file again and copy the exact text, including whitespace and indentation.")
+        if count > 1 and not replace_all:
+            raise HarnessError(f"old_string matches {count} places. Include more surrounding lines to make it unique, or set replace_all.")
+        content = old.replace(search, replacement, -1 if replace_all else 1)
+        self.policy.require("edit_file", _diff(path, old, content), workspace_write=True)
+        # Recheck after the human approval wait.
+        self.workspace.path(path)
+        if _sha(self.workspace.read(path, MAX_TEXT_FILE)) != digest:
+            raise HarnessError("File changed during approval; edit cancelled.")
+        atomic_write(target, content, overwrite=True)
+        first = old[:old.index(search)].count("\n") + 1
+        lines = content.splitlines()
+        context = lines[max(0, first - 4):first + replacement.count("\n") + 3]
+        return {"path": path, "changed": True, "replacements": count if replace_all else 1,
+                "sha256": _sha(content), "first_changed_line": first,
+                "snippet": "\n".join(context)[:2_000]}
+
+    def search_files(self, query, path=".", glob=None, ignore_case=False):
         if not query:
             raise HarnessError("Search query cannot be empty.")
+        needle = query.casefold() if ignore_case else query
         matches = []
-        files = self.list_files(path)
+        files = self.list_files(path, glob)
+        deadline = time.monotonic() + 5
         for name in files["files"]:
+            if time.monotonic() > deadline:
+                return {"matches": matches, "truncated": True}
             try:
-                lines = self.workspace.read(name).splitlines()
+                lines = self.workspace.read(name, 1_000_000).splitlines()
             except (HarnessError, UnicodeError, OSError):
                 continue
             for number, line in enumerate(lines, 1):
-                if query in line:
+                if needle in (line.casefold() if ignore_case else line):
                     matches.append({"path": name, "line": number, "text": line[:500]})
                     if len(matches) >= 50:
                         return {"matches": matches, "truncated": True}

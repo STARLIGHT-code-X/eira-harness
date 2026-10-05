@@ -12,7 +12,7 @@ from . import __version__
 from .agent import Agent, Limits
 from .demo import DemoProvider, sample_csv
 from .finance import backtest, markdown_report
-from .provider import build_provider
+from .provider import DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MODEL_TIMEOUT, MAX_MODEL_TIMEOUT, build_provider
 from .security import HarnessError, Redactor, Workspace, atomic_write, clean_terminal, approval_text
 from .store import Store
 from .tools import Policy, Toolbox
@@ -32,6 +32,31 @@ def approve(name: str, detail: str) -> bool:
     return sys.stdin.readline().strip().lower() == "y"
 
 
+def compact_count(value) -> str:
+    value = value or 0
+    return f"{value / 1_000_000:.1f}M" if value >= 1_000_000 else f"{value / 1000:.1f}k" if value >= 1000 else str(value)
+
+
+def run_summary(event) -> str:
+    parts = [f"{event.get('tools', 0)} tool{'s' if event.get('tools') != 1 else ''}",
+             f"{compact_count(event.get('tokens'))} tokens"]
+    if event.get("seconds") is not None:
+        parts.append(f"{event['seconds']:.1f}s")
+    return " · ".join(parts)
+
+
+def provider_options(args) -> dict:
+    return {"timeout": getattr(args, "model_timeout", DEFAULT_MODEL_TIMEOUT),
+            "max_output_tokens": getattr(args, "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+            "prompt_cache": not getattr(args, "no_prompt_cache", False)}
+
+
+def limits_from(args) -> Limits:
+    return Limits(max_steps=args.max_steps, max_tool_calls=args.max_tool_calls,
+                  max_context_chars=args.max_context_chars, max_total_tokens=args.max_tokens,
+                  compact=not args.no_compact)
+
+
 def renderer(as_json: bool):
     def emit(event):
         if as_json:
@@ -41,13 +66,20 @@ def renderer(as_json: bool):
         if kind == "run_started":
             print_safe(f"\nEIRA / {event['model']}\nSession {event['session']}\n", file=sys.stderr)
         elif kind == "tool_started":
-            print_safe(f"  → {event['name']}", file=sys.stderr)
+            detail = f"  {event['detail']}" if event.get("detail") else ""
+            print_safe(f"  → {event['name']}{detail}", file=sys.stderr)
         elif kind == "tool_completed" and not event["ok"]:
             print_safe(f"  ! {event['error']}", file=sys.stderr)
+        elif kind == "compaction_started":
+            print_safe("  · compacting context…", file=sys.stderr)
+        elif kind == "context_compacted":
+            print_safe(f"  · context compacted: {event['replaced_messages']} messages summarized; originals stay in the trace", file=sys.stderr)
         elif kind == "assistant":
             print_safe(event["text"])
+        elif kind == "run_completed":
+            print_safe(f"\n✓ {run_summary(event)}", file=sys.stderr)
         elif kind == "run_stopped":
-            print_safe(f"Stopped: {event['reason']}. Session saved.", file=sys.stderr)
+            print_safe(f"Stopped: {event['reason']}. Session saved. {run_summary(event)}", file=sys.stderr)
         elif kind == "recovered_tool":
             print_safe("Recovered an interrupted tool call; its outcome is unknown. It was not replayed.", file=sys.stderr)
     return emit
@@ -61,11 +93,26 @@ def build_parser():
     def workspace(command):
         command.add_argument("--workspace", type=Path, default=Path.cwd(), help="Workspace directory (default: current directory)")
 
-    def model_options(command):
-        workspace(command)
+    def provider_flags(command):
         command.add_argument("--model", default=None)
         command.add_argument("--provider", choices=["openai", "anthropic", "openrouter", "gemini", "ollama", "custom"], default=None)
         command.add_argument("--base-url", default=None)
+        command.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS,
+                             help="Per-response output cap sent to the Anthropic profile (default %(default)s)")
+        command.add_argument("--model-timeout", type=int, default=DEFAULT_MODEL_TIMEOUT,
+                             help=f"Seconds allowed per model request, including retries (max {MAX_MODEL_TIMEOUT})")
+        command.add_argument("--no-prompt-cache", action="store_true", help="Do not send prompt-cache markers to Anthropic")
+
+    def limit_flags(command):
+        command.add_argument("--max-steps", type=int, default=20)
+        command.add_argument("--max-tool-calls", type=int, default=50)
+        command.add_argument("--max-tokens", type=int, default=100_000, help="Cumulative reported usage; checked between requests, not a hard billing cap")
+        command.add_argument("--max-context-chars", type=int, default=120_000)
+        command.add_argument("--no-compact", action="store_true", help="Stop at the context limit instead of summarizing older turns")
+
+    def model_options(command):
+        workspace(command)
+        provider_flags(command)
         command.add_argument("--allow-data-source", action="append", choices=["alphavantage", "coinbase"], default=[], help="Preapprove a native daily-price source")
         command.add_argument("--session", help="Resume a session from this workspace")
         command.add_argument("--read-only", action="store_true", help="Deny file writes, memory writes, and shell calls")
@@ -73,10 +120,7 @@ def build_parser():
         command.add_argument("--allow-host", action="append", default=[], help="Preapprove HTTPS GET requests to this exact hostname (repeatable)")
         command.add_argument("--shell", choices=["disabled", "docker"], default="disabled")
         command.add_argument("--docker-image", default="python:3.11-slim", help="Pre-pulled Docker image for shell mode")
-        command.add_argument("--max-steps", type=int, default=20)
-        command.add_argument("--max-tool-calls", type=int, default=50)
-        command.add_argument("--max-tokens", type=int, default=100_000, help="Cumulative reported usage; checked between requests, not a hard billing cap")
-        command.add_argument("--max-context-chars", type=int, default=120_000)
+        limit_flags(command)
         command.add_argument("--json", action="store_true", help="Emit JSONL events to stdout")
 
     run = sub.add_parser("run", help="Run one task")
@@ -112,6 +156,16 @@ def build_parser():
     bt.add_argument("--max-drawdown", type=float, default=.20)
     bt.add_argument("--periods-per-year", type=int, default=252)
     bt.add_argument("--output", help="New workspace-relative .json or .md report (never overwrites)")
+    evaluate = sub.add_parser("eval", help="Score a model on a task suite in throwaway workspaces")
+    workspace(evaluate)
+    evaluate.add_argument("suite", nargs="?", default="starter", help="Workspace-relative suite JSON, or 'starter' (default)")
+    provider_flags(evaluate)
+    limit_flags(evaluate)
+    evaluate.add_argument("--repeat", type=int, default=1, help="Run every task this many times (1–20)")
+    evaluate.add_argument("--work-dir", type=Path, help="Keep task workspaces under this directory for inspection")
+    evaluate.add_argument("--output", help="Write the JSON report to a new workspace-relative file")
+    evaluate.add_argument("--dump-suite", action="store_true", help="Print the suite as JSON without running it")
+    evaluate.add_argument("--json", action="store_true", help="Print only the JSON report")
     sub.add_parser("providers", help="List model provider profiles and credential variables")
     prices = sub.add_parser("prices", help="Download daily prices from a fixed financial-data source")
     workspace(prices)
@@ -162,7 +216,7 @@ def configure_model(args, ui, force=False, choose_provider=True):
         key = getpass.getpass(f'{key_env} (Enter to skip): ')
         if key:
             os.environ[key_env] = key
-    provider = build_provider(selected, model, endpoint)
+    provider = build_provider(selected, model, endpoint, **provider_options(args))
     save_settings(selected, model, endpoint)
     args.provider, args.model, args.base_url = selected, model, endpoint
     ui.notice('Model preferences saved. API keys are read from the environment or entered privately each launch.')
@@ -184,8 +238,7 @@ def run_agent(args, store, workspace):
     policy = Policy(approve=approve, approve_writes=args.approve_writes, read_only=args.read_only,
                     allowed_hosts={h.lower() for h in args.allow_host}, shell_mode=args.shell,
                     docker_image=args.docker_image, allowed_data_sources=set(args.allow_data_source))
-    limits = Limits(max_steps=args.max_steps, max_tool_calls=args.max_tool_calls,
-                    max_context_chars=args.max_context_chars, max_total_tokens=args.max_tokens)
+    limits = limits_from(args)
     provider = None
 
     def banner():
@@ -201,7 +254,7 @@ def run_agent(args, store, workspace):
                 provider = configure_model(args, ui)
             else:
                 try:
-                    provider = build_provider(args.provider, args.model, args.base_url)
+                    provider = build_provider(args.provider, args.model, args.base_url, **provider_options(args))
                 except HarnessError:
                     provider = configure_model(args, ui)
         except HarnessError as exc:
@@ -209,7 +262,7 @@ def run_agent(args, store, workspace):
             ui.notice('Use /model to finish setup, /help for commands, or /exit to leave.')
         store.redact = Redactor()
     else:
-        provider = build_provider(args.provider, args.model, args.base_url)
+        provider = build_provider(args.provider, args.model, args.base_url, **provider_options(args))
 
     def make_agent():
         return Agent(provider, store, Toolbox(workspace, store, policy, session),
@@ -243,7 +296,9 @@ def run_agent(args, store, workspace):
                 ui.notice(f'Endpoint: {args.base_url or PROFILES[args.provider]["default_base_url"]}')
                 ui.notice(f'Writes: {"denied" if args.read_only else "preapproved" if args.approve_writes else "ask first"}\n'
                           f'Hosts: {", ".join(args.allow_host) or "ask first"}\n'
-                          f'Data sources: {", ".join(args.allow_data_source) or "ask first"}')
+                          f'Data sources: {", ".join(args.allow_data_source) or "ask first"}\n'
+                          f'Context: {args.max_context_chars:,} characters; '
+                          f'{"compaction off" if args.no_compact else "older turns are summarized near the limit"}')
             elif command == '/sessions':
                 recent = store.sessions()[:20]
                 ui.notice('\n'.join(f'{s["id"]}  {s["title"]}' for s in recent) or 'No saved sessions.')
@@ -280,6 +335,50 @@ def run_agent(args, store, workspace):
         finally:
             store.redact = Redactor()
     return 0
+
+
+def run_eval(args, workspace):
+    from .evals import load_suite, run_suite
+    from .settings import resolve_settings
+    suite = load_suite(args.suite, workspace)
+    if args.dump_suite:
+        print(json.dumps(suite, indent=2, ensure_ascii=False))
+        return 0
+    target = None
+    if args.output:
+        target = workspace.path(args.output)
+        if target.suffix != ".json" or target.exists():
+            raise HarnessError("Choose a new .json report path; existing files are never overwritten.")
+    resolve_settings(args)
+    limits = limits_from(args)
+    build_provider(args.provider, args.model, args.base_url, **provider_options(args))
+
+    def progress(result, done, total):
+        if args.json:
+            return
+        mark = "✓" if result["passed"] else "✗"
+        reason = "" if result["passed"] else "  " + (result.get("error") or ", ".join(
+            f"{c['type']}{' ' + c['path'] if 'path' in c else ''}" for c in result["checks"] if not c["passed"]))
+        print_safe(f"[{done}/{total}] {mark} {result['task']}  ({result['tool_calls']} tools, "
+                   f"{compact_count(result['tokens'])} tokens, {result['seconds']:.1f}s){reason}", file=sys.stderr)
+
+    if not args.json:
+        print_safe(f"Eira eval · suite {suite['name']} · {args.provider} / {args.model} · "
+                   f"{len(suite['tasks'])} tasks × {args.repeat}", file=sys.stderr)
+    report = run_suite(suite, lambda: build_provider(args.provider, args.model, args.base_url, **provider_options(args)),
+                       limits, repeat=args.repeat, work_dir=args.work_dir, progress=progress)
+    report["provider"] = args.provider
+    encoded = json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False)
+    if target:
+        atomic_write(target, Redactor()(encoded) + "\n", overwrite=False)
+    summary = report["summary"]
+    if args.json:
+        print_safe(encoded)
+    else:
+        print_safe(f"\nPassed {summary['passed']}/{summary['runs']} ({summary['pass_rate']:.0%}) · "
+                   f"{summary['tool_errors']} tool errors · {compact_count(summary['tokens'])} tokens · "
+                   f"{summary['seconds']:.1f}s" + (f"\nReport: {target}" if target else ""), file=sys.stderr)
+    return 0 if summary["passed"] == summary["runs"] else 1
 
 
 def main(argv=None):
@@ -339,6 +438,8 @@ def main(argv=None):
             else:
                 print_safe(json.dumps(result, indent=2, allow_nan=False))
             return 0
+        if args.command == "eval":
+            return run_eval(args, workspace)
         if args.command in {"run", "chat", "setup"}:
             from .settings import resolve_settings
             resolve_settings(args)
@@ -367,7 +468,10 @@ def main(argv=None):
         elif args.command == "sessions":
             print_safe(json.dumps(store.sessions(), indent=2))
         elif args.command == "trace":
-            print_safe(json.dumps({"session": args.session, "messages": store.messages(args.session),
+            store.require(args.session)
+            frozen = store.session_context(args.session)
+            print_safe(json.dumps({"session": args.session, "system": frozen["system"] if frozen else None,
+                                   "messages": store.messages(args.session),
                                    "events": store.events(args.session)}, indent=2))
         elif args.command == "memory":
             if args.forget:

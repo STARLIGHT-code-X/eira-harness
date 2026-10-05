@@ -137,10 +137,22 @@ class Terminal:
             if self._thinking_since is not None:
                 elapsed = f" ({time.monotonic() - self._thinking_since:.1f}s)"
             self._thinking_since = None
-            self._write(self._paint(self.palette.muted, f"  · model ready{elapsed}"))
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            cached = usage.get("cache_read_input_tokens")
+            cache = f" · {self._count(cached)} cached" if isinstance(cached, int) and cached > 0 else ""
+            self._write(self._paint(self.palette.muted, f"  · model ready{elapsed}{cache}"))
         elif kind == "tool_started":
             name = self._safe(event.get("name", "tool"), 160)
-            self._write(self._paint(self.palette.cyan, f"  → {name}"))
+            detail = self._field(event.get("detail") or "", max(0, self.width - len(name) - 8))
+            line = self._paint(self.palette.cyan, f"  → {name}")
+            self._write(line + (self._paint(self.palette.muted, f"  {detail}") if detail else ""))
+        elif kind == "compaction_started":
+            self._write(self._paint(self.palette.muted, "  · compacting context…"))
+        elif kind == "context_compacted":
+            self.notice(f"Context compacted: {event.get('replaced_messages', 0)} earlier messages summarized. "
+                        "Originals stay in the session trace.")
+        elif kind == "workspace_context_updated":
+            self._write(self._paint(self.palette.muted, "  · workspace guidance or memory changed; update sent to the model"))
         elif kind == "tool_completed":
             if event.get("ok"):
                 self._write(self._paint(self.palette.green, "  ✓ tool completed"))
@@ -153,9 +165,18 @@ class Terminal:
         elif kind == "run_stopped":
             self.notice(f"Stopped: {event.get('reason', 'limit')}. Session saved.")
         elif kind == "run_completed":
-            self._write(self._paint(self.palette.green, "✓ Run completed"))
+            seconds = event.get("seconds")
+            timing = f" · {seconds:.1f}s" if isinstance(seconds, (int, float)) else ""
+            tools = event.get("tools", 0)
+            self._write(self._paint(self.palette.green, f"✓ Run completed · {tools} tool{'s' if tools != 1 else ''} · "
+                                                        f"{self._count(event.get('tokens', 0))} tokens{timing}"))
         elif kind == "run_failed":
             self.error(event.get("error", "Run failed"))
+
+    @staticmethod
+    def _count(value) -> str:
+        value = value if isinstance(value, int) else 0
+        return f"{value / 1_000_000:.1f}M" if value >= 1_000_000 else f"{value / 1000:.1f}k" if value >= 1000 else str(value)
 
     def notice(self, text) -> None:
         self._write(self._paint(self.palette.yellow, self._safe(text, 8_000)))

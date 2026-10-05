@@ -1,6 +1,6 @@
 # Security boundaries
 
-Eira 0.2 is an early local developer tool. It has received an internal code review and regression testing, not an independent security certification. Use a dedicated project workspace without secrets.
+Eira 0.4 is an early local developer tool. It has received an internal code review and regression testing, not an independent security certification. Use a dedicated project workspace without secrets.
 
 ## Enforced controls
 
@@ -18,11 +18,15 @@ Eira 0.2 is an early local developer tool. It has received an internal code revi
 
 ## Limits that remain
 
-Docker must be installed and its chosen image pre-pulled. The Docker integration is implemented and its command construction is tested, but it was not exercised against a real Docker daemon in this development environment. A selected image remains a trusted dependency. Docker and the host OS must be maintained by the operator.
+Docker must be installed and its chosen image pre-pulled. `tests/test_docker_integration.py` exercises the shell tool against a real daemon (in CI, and locally when `EIRA_DOCKER_IMAGE` is set). It verifies blocked networking, an empty effective capability set, a read-only container root, the hidden `.eira` directory, timeout and output limits, container removal, and that denied commands start nothing. It was run against a Linux daemon during development, and the CI workflow runs it on GitHub's Ubuntu runners; macOS and rootless Docker are not yet covered. A selected image remains a trusted dependency. Docker and the host OS must be maintained by the operator.
 
 The workspace mount is writable and visible to approved shell commands, including files that file tools would block. The `.eira` directory is covered by a container tmpfs, but other workspace secrets are not automatically hidden. Workspace disk consumption by arbitrary programs is not quota-controlled. Do not mount your home directory or a workspace containing credentials. A container is not equivalent to a VM, and these controls do not establish production-grade isolation.
 
 Path checks can race a hostile local process. The state database is permission-restricted but not encrypted, tamper-proof, or an authority boundary against the same OS account. Redaction is best-effort: unknown, transformed, encoded, or pasted secrets may remain. Guidance, fetched text, and memory are untrusted context; prompt instructions alone are not a complete prompt-injection defense.
+
+Context compaction sends the conversation so far to the configured model to produce a summary, the same data any normal request already sends. The summary is model-written and can be incomplete or wrong; originals stay in the journal and `--no-compact` disables it. Workspace guidance and memory changes are appended to a session as labelled user messages and remain context, never authority.
+
+`eira eval` runs each task in a fresh temporary workspace with file and memory writes preapproved. Shell, URL fetching, and market data are denied there. Suite fixture paths follow the same workspace rules as file tools. Checks never execute model-written code.
 
 Changing providers or resuming sessions sends existing relevant history to the newly selected provider. Choose endpoints and data handling deliberately. Never store credentials in `EIRA.md`, saved notes, examples, or traces intended for sharing.
 

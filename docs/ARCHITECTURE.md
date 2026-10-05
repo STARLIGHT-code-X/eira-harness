@@ -25,14 +25,15 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | Module | Responsibility |
 |---|---|
 | `cli.py` | Commands, model configuration, terminal approvals, JSONL rendering |
-| `agent.py` | Bounded loop, system instructions, history, budget checks, crash recovery |
-| `provider.py` | HTTP transport and validation of the Chat Completions response envelope |
+| `agent.py` | Bounded loop, frozen session prefix, compaction, budget checks, crash recovery |
+| `provider.py` | HTTP transport, Chat Completions and Anthropic Messages translation, prompt caching |
 | `tools.py` | Tool definitions, argument validation, workspace operations, execution policy |
 | `security.py` | Path checks, atomic file writes, best-effort secret redaction, terminal sanitization |
 | `network.py` | Bounded HTTP transport, total deadlines, address pinning, and text retrieval |
 | `market_data.py` | Fixed-source daily price retrieval and CSV normalization |
 | `finance.py` | Deterministic SMA simulation, metrics, report formatting |
 | `store.py` | SQLite journal, workspace memory, per-session file locks |
+| `evals.py` | Task suites, throwaway workspaces, declarative checks, reports |
 | `demo.py` | Synthetic data generator and offline fixture provider |
 
 ## Provider contract
@@ -41,7 +42,9 @@ A provider exposes `model: str` and `complete(messages, tools) -> (assistant_mes
 
 Messages use the Chat Completions conversation format. A tool result has `role: "tool"`, the original `tool_call_id`, and JSON-encoded content. The stock provider validates roles, text content, function-call envelopes, unique call IDs within each response, and completion status before returning a response to the runtime. Custom providers must honor that contract.
 
-Model HTTP errors `429`, `500`, `502`, `503`, and `504` receive at most two retries. Authentication failures and malformed responses fail immediately. Uncertain connection failures are not retried automatically. HTTP error bodies are not echoed. Streaming and context compaction are future work.
+Model HTTP errors `429`, `500`, `502`, `503`, `504`, and `529` receive at most two retries within `--model-timeout`. Authentication failures and malformed responses fail immediately. Uncertain connection failures are not retried automatically. HTTP error bodies are not echoed; errors name the status and, when present, a lowercase provider error-type token. Streaming is future work.
+
+An assistant message may carry `anthropic_content`: the provider's original content blocks, kept when the turn includes `thinking` or `redacted_thinking` blocks. The Anthropic transport replays them verbatim and in order when their `tool_use` ids still match the normalized `tool_calls`, and otherwise rebuilds the turn from `content` and `tool_calls`. The Chat Completions transport sends only standard message fields, so local metadata never reaches those servers.
 
 ## Adding a tool
 
@@ -62,6 +65,16 @@ toolbox.register(Tool(
 Current schemas support scalar string, integer, number, and boolean properties, required fields, enum values, simple bounds, and rejection of undeclared properties. The validator is deliberately not advertised as a full JSON Schema implementation.
 
 New side-effecting tools must call `toolbox.policy.require(...)` before execution. `Toolbox.register` does not infer a custom tool's privileges; plugin authors are trusted application developers, not untrusted model output. Use `Workspace` for file boundaries. Never pass arbitrary tool names or arguments directly to a shell or import statement. Add behavioral tests for denials, malformed input, and interrupted execution.
+
+## Session prefix and compaction
+
+Providers cache, and newer models bind their reasoning to, the exact request prefix: system prompt, tools, then earlier messages. Eira therefore keeps every request in a session append-only:
+
+- The system prompt, `EIRA.md`, and memory are captured in the `session_context` table on the session's first run. Later changes are detected by digest and appended as a labelled user message on the next task. The original prompt is never rewritten.
+- Tools are registered in a fixed order. Recovery closes interrupted calls by appending results.
+- Tool results are fitted to `max_tool_output_chars` once, when they are journaled, so replays are identical.
+
+Compaction is whole-history: at 80% of `max_context_chars`, the current conversation plus a summarization instruction is sent as one request (the same prefix, so it can hit the cache). The reply becomes a user message tagged `eira_compaction` that also quotes the latest user request. `Store.model_messages` starts the model's view at the most recent such message, so nothing older, including reasoning blocks, is replayed. If the summary request itself would exceed the limit, the largest tool results are omitted from that one request only. The journal keeps every original message. At most three compactions run per task; `Limits(compact=False)` or `--no-compact` restores the hard stop.
 
 ## Journal semantics
 

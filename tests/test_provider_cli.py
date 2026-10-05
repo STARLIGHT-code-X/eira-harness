@@ -133,7 +133,9 @@ class CLITests(unittest.TestCase):
             session = events[0]["session"]
             code, output, _ = self.invoke(["trace", session, "--workspace", root])
             self.assertEqual(code, 0)
-            self.assertTrue(json.loads(output)["messages"])
+            trace = json.loads(output)
+            self.assertTrue(trace["messages"])
+            self.assertTrue(trace["system"].startswith("You are Eira"))
             code, output, _ = self.invoke(["sessions", "--workspace", root])
             self.assertEqual(json.loads(output)[0]["id"], session)
 
