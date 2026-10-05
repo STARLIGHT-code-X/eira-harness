@@ -71,8 +71,12 @@ class DockerShellIntegrationTests(unittest.TestCase):
 
     def test_eira_state_is_hidden_from_commands(self):
         self.assertTrue((self.root / ".eira" / "state.db").exists())
-        result = self.sh("ls -A /workspace/.eira | wc -l")
-        self.assertEqual(result["output"].strip(), "0")
+        # The tmpfs over .eira is root-owned with mode 0700: empty to a root
+        # container user, unlistable to anyone else. Either way the host's
+        # journal must be neither visible nor readable.
+        result = self.sh("if test -e .eira/state.db; then echo visible; else echo hidden; fi; "
+                         "if cat .eira/state.db >/dev/null 2>&1; then echo readable; else echo unreadable; fi")
+        self.assertEqual(result["output"].split(), ["hidden", "unreadable"])
 
     def test_timeout_and_output_limits_stop_and_remove_container(self):
         result = self.sh("sleep 20", timeout=2)
