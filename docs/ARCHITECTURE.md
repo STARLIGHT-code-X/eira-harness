@@ -29,6 +29,7 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | `provider.py` | HTTP transport, Chat Completions and Anthropic Messages translation, prompt caching |
 | `tools.py` | Tool definitions, argument validation, workspace operations, execution policy |
 | `patch.py` | `apply_patch`: Codex-format parser, tolerant matching, one combined approval, all-or-nothing commit with rollback ([PATCHES.md](PATCHES.md)) |
+| `outputs.py` | Head-and-tail shortening of long output; saved, redacted copies paged by `read_output` |
 | `text.py` | Shared line splitting: only `\r\n`, `\r` and `\n` end a line, as in the file tools |
 | `security.py` | Path checks, atomic file writes, best-effort secret redaction, terminal sanitization |
 | `network.py` | Bounded HTTP transport, total deadlines, address pinning, and text retrieval |
@@ -92,6 +93,16 @@ Providers cache, and newer models bind their reasoning to, the exact request pre
 - Tool results are fitted to `max_tool_output_chars` once, when they are journaled, so replays are identical.
 
 Compaction is whole-history: at 80% of `max_context_chars`, the current conversation plus a summarization instruction is sent as one request (the same prefix and tools, so it can hit the cache, with `tool_choice` set to `none` for providers whose `complete()` accepts it). Text that arrives with stray tool calls is used and the calls are dropped; a reply with no text fails with a `compaction_failed` event that carries its usage. The full summary is kept in the marker's metadata, and the latest guidance and memory are recomputed at compaction time. The reply becomes a user message tagged `eira_compaction` that also quotes the latest user request. `Store.model_messages` starts the model's view at the most recent such message, so nothing older, including reasoning blocks, is replayed. If the summary request itself would exceed the limit, the largest tool results are omitted from that one request only. The journal keeps every original message. At most three compactions run per task; `Limits(compact=False)` or `--no-compact` restores the hard stop.
+
+## Tool output budgets
+
+Long output keeps its beginning and its end, because test failures, stack traces and summaries are usually at the bottom. `outputs.head_tail(text, budget)` keeps about half the budget from each end, moves each cut inward to a line boundary when one is within 200 characters (so the kept text never exceeds the budget), and puts one marker line in between, for example `…[48,213 characters truncated (lines 212-4,977); read_output(output_id="o-3fa9c1d2e4b5", start_line=212) shows them]…`. Line numbers follow the `text.split_lines` rule.
+
+- `shell` captures up to 4 MiB (`SHELL_CAPTURE_BYTES`) and stops the command past that. The result shows the first and last 10,000 characters and adds `total_bytes`, `total_lines` and `output_id` (null when nothing was shortened). A stopped command's result says the saved copy is incomplete.
+- `fetch_url` reads up to 1,000,000 characters of a page and shows the first and last 15,000 when it is longer than 30,000; it adds `total_chars` and `output_id`.
+- `Agent.fit` shortens a result's longest strings to head and tail halves when the encoded result exceeds `max_tool_output_chars`, saves the complete encoded result as indented JSON (so it pages by line) and adds `output_id` at the top level. It still runs once, at journal time, so replays and prompt prefixes stay identical.
+
+Saved copies live in `.eira/outputs/<session>/<output_id>.txt`. `OutputStore.save` redacts the text, cuts it to 4 MiB with a closing note, writes it atomically with mode 0600 in 0700 directories that must not be symlinks, evicts the session's oldest copies past 64 MiB, and sweeps copies older than 7 days from every session (at most 1,000 entries per save). The `read_output` tool accepts only ids matching `o-` and 12 hex digits and resolves them in the current session's directory alone. It returns pages of at most 400 lines or 24,000 characters with `next_start_line`, or, with `query`, up to 100 literal-substring matches as `{line, text}`. A missing copy reports that it expired or was never saved. A successful save from `shell` or `fetch_url` raises the `output_saved` event, and the terminal prints `· long output saved (N lines)`. `Toolbox.outputs` is created lazily; saving is best effort, and a failed save only removes the pointer from the marker.
 
 ## Journal semantics
 

@@ -39,3 +39,9 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 |---|---|---|
 | `patch_rolled_back` | `patch_id` (str, 12 hex), `path` (str, workspace-relative), `error` (str, errno name such as `"ENOSPC"`) | A write failed during an `apply_patch` commit and every completed step was undone; no file changed |
 | `patch_rollback_failed` | `patch_id` (str), `path` (str), `error` (str, errno name), `directory` (str, absolute path of the kept `.eira/patches/<id>`) | A write failed and the rollback could not undo every step; the journal directory is kept with `state: "rollback_failed"` (see [PATCHES.md](PATCHES.md)) |
+
+## Output truncation and spill
+
+| Event | Fields | When |
+|---|---|---|
+| `output_saved` | `output_id` (str), `tool` (`"shell"` or `"fetch_url"`), `bytes` (int), `lines` (int) | A long tool output was shortened and its full redacted copy saved for `read_output` |

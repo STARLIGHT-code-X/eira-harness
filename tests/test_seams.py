@@ -61,6 +61,7 @@ class ToolMetadataTests(SeamTestCase):
         expected = {"list_files": {"read"}, "read_file": {"read"}, "search_files": {"read"}, "backtest_sma": {"read"},
                     "edit_file": {"read", "write"}, "apply_patch": {"read", "write"},
                     "write_file": {"read", "write"}, "fetch_url": {"network"},
+                    "read_output": {"read"},
                     "market_prices": {"network"}, "shell": {"exec", "write"}, "remember": {"memory"}, "set_plan": set()}
         self.assertEqual({name: set(tool.effects) for name, tool in self.tools.registry.items()}, expected)
         self.assertTrue(all(type(tool.effects) is frozenset for tool in self.tools.registry.values()))
@@ -283,7 +284,8 @@ class FakeDockerShellTests(SeamTestCase):
     def test_shell_result_matches_previous_release(self):
         with fake_docker(self.log):
             result = self.tools.call("shell", {"command": "printf hi && printf made > out.txt"})
-        self.assertEqual(result, {"exit_code": 0, "output": "hi", "truncated": False, "stopped": None})
+        self.assertEqual(result, {"exit_code": 0, "output": "hi", "truncated": False, "stopped": None,
+                                  "total_bytes": 2, "total_lines": 1, "output_id": None})
         self.assertEqual((self.root / "out.txt").read_text(), "made")
         self.assertEqual(self.asked, [("shell", f"Mode: docker\nDirectory: {self.root.resolve()}\nTimeout: 30s\n"
                                                 "Command:\nprintf hi && printf made > out.txt\n"
@@ -300,7 +302,11 @@ class FakeDockerShellTests(SeamTestCase):
             result = self.tools.shell("echo oops >&2; exit 3")
             self.assertEqual((result["exit_code"], result["output"]), (3, "oops\n"))
             result = self.tools.shell("yes x | head -c 1200000")
-            self.assertEqual((result["stopped"], result["truncated"], len(result["output"])), ("output_limit", True, 20_000))
+            # yes may add a broken-pipe message on stderr.
+            self.assertEqual((result["stopped"], result["truncated"]), (None, True))
+            self.assertGreaterEqual(result["total_bytes"], 1_200_000)
+            self.assertIn("characters truncated", result["output"])
+            self.assertLess(len(result["output"]), 20_200)
             result = self.tools.shell("sleep 5", timeout=1)
             self.assertEqual(result["stopped"], "timeout")
         self.assertEqual([call[0] for call in self.calls()], ["run", "rm"] * 3)
@@ -339,7 +345,7 @@ class FakeDockerShellTests(SeamTestCase):
 
 class CaptureTests(unittest.TestCase):
     def test_run_capture_bounds_data(self):
-        self.assertEqual(SHELL_CAPTURE_BYTES, 1_000_000)
+        self.assertEqual(SHELL_CAPTURE_BYTES, 4_194_304)
         with tempfile.TemporaryDirectory() as temp:
             result = _run_capture([sys.executable, "-c", "print('y' * 5000)"], temp, {}, 5, capture_limit=1000)
             self.assertEqual((len(result["data"]), result["stopped"]), (1000, "output_limit"))

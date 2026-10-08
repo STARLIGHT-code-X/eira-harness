@@ -99,7 +99,7 @@ class DockerShellIntegrationTests(unittest.TestCase):
         before = eira_containers()
         result = self.sh("sleep 20", timeout=2)
         self.assertEqual(result["stopped"], "timeout")
-        result = self.sh("python -c \"import sys; sys.stdout.write('x' * 2000000)\"")
+        result = self.sh("python -c \"import sys; sys.stdout.write('x' * 5000000)\"")
         self.assertEqual(result["stopped"], "output_limit")
         self.assertTrue(result["truncated"])
         self.assertEqual(eira_containers() - before, set())

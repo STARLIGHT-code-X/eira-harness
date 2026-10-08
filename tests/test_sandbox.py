@@ -260,7 +260,9 @@ class PipelineTests(SandboxCase):
         self.fixture()
         with fake_docker(self.log):
             result = self.tools.shell("printf ok")
-        self.assertEqual(result, {"exit_code": 0, "output": "ok", "truncated": False, "stopped": None})
+        # Other features may add fields (output-truncation-spill adds sizes and an output id).
+        self.assertEqual({k: result[k] for k in ("exit_code", "output", "truncated", "stopped")},
+                         {"exit_code": 0, "output": "ok", "truncated": False, "stopped": None})
         self.assertTrue(self.asked[0][1].endswith("\nSandbox: no network, read-only system, 4 secret paths hidden, "
                                                   "6 config paths read-only, 1 git config sanitized"))
         run, cleanup = self.calls()

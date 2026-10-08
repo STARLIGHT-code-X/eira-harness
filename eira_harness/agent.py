@@ -238,13 +238,29 @@ class Agent:
         return safe
 
     def fit(self, result: dict) -> str:
-        """Encode a tool result within budget while keeping it valid JSON."""
+        """Encode a tool result within budget while keeping it valid JSON.
+
+        A long field keeps its head and tail. The complete encoded result,
+        already redacted, is saved for read_output and its output_id added.
+        """
         limit = self.limits.max_tool_output_chars
         encoded = self.store.encode(result)
         if len(encoded) <= limit:
             return encoded
         data = json.loads(encoded)
+        output_id = None
+        outputs = getattr(self.toolbox, "outputs", None)
+        if outputs is not None:
+            try:
+                # indent=1 puts values on their own lines, so the copy pages by line.
+                output_id = outputs.save(json.dumps(data, indent=1, ensure_ascii=False), "tool_result")["output_id"]
+            except (OSError, HarnessError, UnicodeError):
+                output_id = None
+            output_id = output_id if isinstance(output_id, str) else None
         data["truncated"] = True
+        if output_id:
+            data["output_id"] = output_id
+        where = "see output_id" if output_id else "request a narrower range"
         for _ in range(64):
             path, length = _longest_string(data)
             if path is None or length < 400:
@@ -255,14 +271,20 @@ class Agent:
             for key in path[:-1]:
                 parent = parent[key]
             value = parent[path[-1]]
-            parent[path[-1]] = value[:keep] + f"\n…[{length - keep:,} characters truncated; request a narrower range]"
+            head = keep - keep // 2
+            parent[path[-1]] = (value[:head] + f"\n…[{length - keep:,} characters truncated; {where}]…\n"
+                                + value[length - keep // 2:])
             encoded = json.dumps(data, ensure_ascii=False, allow_nan=False)
             if len(encoded) <= limit:
                 return encoded
         preview = encoded[:max(0, limit - 300)]
         while True:
-            fallback = json.dumps({"ok": result["ok"], "truncated": True, "preview": preview,
-                                   "note": "Output truncated; use targeted search or smaller files."}, ensure_ascii=False)
+            fallback = {"ok": result["ok"], "truncated": True, "preview": preview,
+                        "note": "Output truncated; use targeted search or smaller files."}
+            if output_id:
+                fallback["output_id"] = output_id
+                fallback["note"] = "Output truncated; read_output with output_id pages the full result."
+            fallback = json.dumps(fallback, ensure_ascii=False)
             if len(fallback) <= limit or not preview:
                 return fallback
             preview = preview[:len(preview) - (len(fallback) - limit) - 1]
