@@ -28,6 +28,7 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | `agent.py` | Bounded loop, frozen session prefix, compaction, budget checks, crash recovery |
 | `provider.py` | HTTP transport, Chat Completions and Anthropic Messages translation, prompt caching |
 | `tools.py` | Tool definitions, argument validation, workspace operations, execution policy |
+| `patch.py` | `apply_patch`: Codex-format parser, tolerant matching, one combined approval, all-or-nothing commit with rollback ([PATCHES.md](PATCHES.md)) |
 | `text.py` | Shared line splitting: only `\r\n`, `\r` and `\n` end a line, as in the file tools |
 | `security.py` | Path checks, atomic file writes, best-effort secret redaction, terminal sanitization |
 | `network.py` | Bounded HTTP transport, total deadlines, address pinning, and text retrieval |

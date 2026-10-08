@@ -95,6 +95,27 @@
  {
   "type": "function",
   "function": {
+   "name": "apply_patch",
+   "description": "Edit files with a patch. Use it for multi-line, multi-hunk or multi-file changes, renames and deletions; use edit_file for one exact replacement. Format:\n*** Begin Patch\n*** Add File: <path>  (every following line starts with +)\n*** Delete File: <path>\n*** Update File: <path>\n*** Move to: <new path>  (optional, directly after Update File)\n@@ <optional line just above the change, e.g. def name():>\n<context lines start with a space, removed lines with -, added lines with +>\n*** End of File  (optional; the hunk ends at end of file)\n*** End Patch\nShow about 3 lines of context around each change and add an @@ line when context repeats. Paths are workspace-relative. The patch is validated, shown as one diff for approval and applied all-or-nothing. Do not re-read files after a successful patch.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "input": {
+      "type": "string",
+      "description": "The entire patch, from *** Begin Patch to *** End Patch",
+      "maxLength": 1000000
+     }
+    },
+    "required": [
+     "input"
+    ],
+    "additionalProperties": false
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
    "name": "write_file",
    "description": "Create or replace a whole UTF-8 file after diff approval. For an existing file supply expected_sha256 from read_file; for a new file use 'new'.",
    "parameters": {

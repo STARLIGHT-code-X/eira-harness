@@ -59,7 +59,8 @@ class SeamTestCase(unittest.TestCase):
 class ToolMetadataTests(SeamTestCase):
     def test_every_builtin_declares_effects(self):
         expected = {"list_files": {"read"}, "read_file": {"read"}, "search_files": {"read"}, "backtest_sma": {"read"},
-                    "edit_file": {"read", "write"}, "write_file": {"read", "write"}, "fetch_url": {"network"},
+                    "edit_file": {"read", "write"}, "apply_patch": {"read", "write"},
+                    "write_file": {"read", "write"}, "fetch_url": {"network"},
                     "market_prices": {"network"}, "shell": {"exec", "write"}, "remember": {"memory"}, "set_plan": set()}
         self.assertEqual({name: set(tool.effects) for name, tool in self.tools.registry.items()}, expected)
         self.assertTrue(all(type(tool.effects) is frozenset for tool in self.tools.registry.values()))

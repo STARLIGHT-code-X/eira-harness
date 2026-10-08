@@ -1,0 +1,8 @@
+*** Begin Patch
+*** Add File: created.txt
++new
+*** Update File: missing.txt
+@@
+-a
++b
+*** End Patch

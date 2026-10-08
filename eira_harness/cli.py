@@ -425,6 +425,7 @@ def main(argv=None):
             args.workspace.mkdir(parents=True, exist_ok=True)
         workspace = Workspace(args.workspace)
         if args.command == "doctor":
+            from . import patch
             from .provider import PROFILES
             from .settings import resolve_settings
             selected = resolve_settings(argparse.Namespace(provider=None, model=None, base_url=None))
@@ -434,7 +435,8 @@ def main(argv=None):
                       "provider": selected.provider, "api_key_present": bool(os.getenv(key_env)),
                       "docker_available": bool(shutil.which("docker")),
                       "session_lock_supported": os.name == "posix",
-                      "live_provider_tested": False}
+                      "live_provider_tested": False,
+                      "incomplete_patches": patch.leftovers(workspace.root / ".eira")}
             print_safe(json.dumps(report, indent=2))
             return 0
         if args.command == "prices":

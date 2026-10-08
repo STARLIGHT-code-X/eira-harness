@@ -1,0 +1,7 @@
+*** Begin Patch
+*** Update File: prune.txt
+@@
+ keep one
+-drop me
+ keep two
+*** End Patch

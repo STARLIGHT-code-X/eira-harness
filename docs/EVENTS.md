@@ -25,3 +25,10 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 | `reasoning_withheld` | `reason` (`"redaction"`) | Redaction would have changed signed provider blocks, so the turn was journaled without them |
 | `plan` | `plan` (str) | Journal only, never emitted: the `set_plan` tool recorded the plan |
 | `error` | `error` (str, redacted) | CLI only, never journaled and without `session`: with `--json`, the command ended with an error and exits 2 (a failed run prints `run_failed` first) |
+
+## apply_patch
+
+| Event | Fields | When |
+|---|---|---|
+| `patch_rolled_back` | `patch_id` (str, 12 hex), `path` (str, workspace-relative), `error` (str, errno name such as `"ENOSPC"`) | A write failed during an `apply_patch` commit and every completed step was undone; no file changed |
+| `patch_rollback_failed` | `patch_id` (str), `path` (str), `error` (str, errno name), `directory` (str, absolute path of the kept `.eira/patches/<id>`) | A write failed and the rollback could not undo every step; the journal directory is kept with `state: "rollback_failed"` (see [PATCHES.md](PATCHES.md)) |

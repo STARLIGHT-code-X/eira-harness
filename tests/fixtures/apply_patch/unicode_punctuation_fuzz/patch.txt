@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: quotes.txt
+@@
+-He said "wait - now"
++He said "go"
+*** End Patch
