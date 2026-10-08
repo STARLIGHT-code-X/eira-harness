@@ -42,6 +42,12 @@ class Store:
                 kind TEXT NOT NULL, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS memory (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS session_context (
+                session TEXT PRIMARY KEY, system TEXT NOT NULL, digest TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                id TEXT PRIMARY KEY, session TEXT NOT NULL, created TEXT NOT NULL, kind TEXT NOT NULL,
+                label TEXT NOT NULL, user_seq INTEGER, message_seq INTEGER, manifest TEXT,
+                files INTEGER NOT NULL, bytes INTEGER NOT NULL);
         """)
 
     def close(self):
@@ -92,15 +98,91 @@ class Store:
         finally:
             os.close(fd)
 
-    def append(self, session: str, message: dict):
+    def append(self, session: str, message: dict) -> int:
         with self.db:
-            self.db.execute("INSERT INTO messages(session,payload) VALUES (?,?)",
-                            (session, self.encode(message)))
+            cursor = self.db.execute("INSERT INTO messages(session,payload) VALUES (?,?)",
+                                     (session, self.encode(message)))
+        return cursor.lastrowid
 
     def messages(self, session: str) -> list[dict]:
+        return [message for _, message in self.message_rows(session)]
+
+    def message_rows(self, session: str) -> list[tuple[int, dict]]:
         self.require(session)
-        return [json.loads(row[0]) for row in self.db.execute(
-            "SELECT payload FROM messages WHERE session=? ORDER BY seq", (session,))]
+        return [(row[0], json.loads(row[1])) for row in self.db.execute(
+            "SELECT seq, payload FROM messages WHERE session=? ORDER BY seq", (session,))]
+
+    @staticmethod
+    def replay(rows: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
+        """Replay the journal into the model's view.
+
+        A normal row is appended. An ``eira_compaction`` row restarts the view.
+        A rewind marker replaces the view with the view as it stood just before
+        its ``to_seq`` row, which already reflects earlier markers. Markers are
+        never part of the view. Views share tails, so memory stays linear.
+        """
+        before, state = {}, None
+        for seq, message in rows:
+            before[seq] = state
+            if message.get("role") == "marker":
+                rewind = message.get("eira_rewind")
+                to_seq = rewind.get("to_seq") if isinstance(rewind, dict) else None
+                if type(to_seq) is int and to_seq in before:
+                    state = before[to_seq]
+                continue
+            state = ((seq, message), None if "eira_compaction" in message else state)
+        view = []
+        while state is not None:
+            view.append(state[0])
+            state = state[1]
+        view.reverse()
+        return view
+
+    def model_messages(self, session: str) -> list[dict]:
+        """Messages the model sees, replayed from the append-only journal.
+
+        Compaction and rewinds never delete history. Earlier messages stay in
+        the journal and in traces; only the model's view changes.
+        """
+        return [message for _, message in self.replay(self.message_rows(session))]
+
+    def append_rewind(self, session: str, to_seq: int, checkpoint: str) -> int:
+        if type(to_seq) is not int or not self.db.execute(
+                "SELECT 1 FROM messages WHERE session=? AND seq=?", (session, to_seq)).fetchone():
+            raise HarnessError("The rewind target is not a message in this session.")
+        return self.append(session, {"role": "marker", "eira_rewind": {"to_seq": to_seq, "checkpoint": checkpoint}})
+
+    def add_checkpoint(self, row: dict):
+        self.require(row["session"])
+        with self.db:
+            self.db.execute("INSERT INTO checkpoints(id,session,created,kind,label,user_seq,message_seq,manifest,files,bytes) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (row["id"], row["session"], row["created"], row["kind"], self.redact(row["label"]),
+                             row["user_seq"], row["message_seq"], row["manifest"], row["files"], row["bytes"]))
+
+    def checkpoint(self, checkpoint_id: str) -> dict | None:
+        row = self.db.execute("SELECT * FROM checkpoints WHERE id=?", (checkpoint_id,)).fetchone()
+        return dict(row) if row else None
+
+    def checkpoints(self, session: str) -> list[dict]:
+        self.require(session)
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM checkpoints WHERE session=? ORDER BY rowid", (session,))]
+
+    def session_context(self, session: str) -> dict | None:
+        row = self.db.execute("SELECT system, digest FROM session_context WHERE session=?", (session,)).fetchone()
+        return dict(row) if row else None
+
+    def set_session_context(self, session: str, system: str, digest: str):
+        self.require(session)
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO session_context VALUES (?,?,?)",
+                            (session, self.redact(system), digest))
+
+    def set_session_digest(self, session: str, digest: str):
+        # The frozen prompt itself is never rewritten, even if redaction rules change.
+        with self.db:
+            self.db.execute("UPDATE session_context SET digest=? WHERE session=?", (digest, session))
 
     def event(self, session: str, kind: str, payload: dict):
         with self.db:

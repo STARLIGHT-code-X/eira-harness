@@ -87,7 +87,7 @@ class Terminal:
             self._row(f"model      {self._field(model_text, inner - 12)}", inner),
             self._row(f"version    {self._field(__version__, inner - 12)}", inner),
             self._row(f"session    {self._field(self._session, inner - 12)}", inner),
-            self._row(f"access     {permission}  shell: {self._field(self._safe(shell, 16), inner - 31)}", inner),
+            self._row(f"access     {permission}  shell: {self._field(self._safe(shell, 40), inner - 31)}", inner),
         ]
         top = "╭" + "─" * inner + "╮"
         bottom = "╰" + "─" * inner + "╯"
@@ -137,25 +137,71 @@ class Terminal:
             if self._thinking_since is not None:
                 elapsed = f" ({time.monotonic() - self._thinking_since:.1f}s)"
             self._thinking_since = None
-            self._write(self._paint(self.palette.muted, f"  · model ready{elapsed}"))
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            cached = usage.get("cache_read_input_tokens")
+            cache = f" · {self._count(cached)} cached" if isinstance(cached, int) and cached > 0 else ""
+            self._write(self._paint(self.palette.muted, f"  · model ready{elapsed}{cache}"))
         elif kind == "tool_started":
             name = self._safe(event.get("name", "tool"), 160)
-            self._write(self._paint(self.palette.cyan, f"  → {name}"))
+            room = max(0, self.width - len(name) - 8)
+            detail = " ".join(self._safe(event.get("detail") or "", 500).split())
+            # Keep the head: a path or command reads from its start.
+            detail = detail if len(detail) <= room else (detail[:room - 1] + "…" if room > 1 else "")
+            line = self._paint(self.palette.cyan, f"  → {name}")
+            self._write(line + (self._paint(self.palette.muted, f"  {detail}") if detail else ""))
+        elif kind == "approval_decided" and event.get("decision") == "auto":
+            self._write(self._paint(self.palette.muted, "  · running in the sandbox without approval"))
+        elif kind == "compaction_started":
+            self._write(self._paint(self.palette.muted, "  · compacting context…"))
+        elif kind == "context_compacted":
+            self.notice(f"Context compacted: {event.get('replaced_messages', 0)} earlier messages summarized. "
+                        "Originals stay in the session trace.")
+        elif kind == "workspace_context_updated":
+            self._write(self._paint(self.palette.muted, "  · workspace guidance or memory changed; update sent to the model"))
+        elif kind in {"checkpoint_failed", "checkpoint_skipped"}:
+            self.notice(f"No checkpoint for this step ({event.get('reason', 'unknown')}); continuing.")
+        elif kind == "rewind_completed":
+            mode = event.get("mode", "")
+            parts = [f"Rewound {mode} to {event.get('checkpoint', '')}"]
+            if mode != "conversation":
+                parts.append(f"{event.get('restored', 0)} restored, {event.get('deleted', 0)} deleted")
+            if mode != "code":
+                parts.append(f"{event.get('hidden_messages', 0)} messages hidden from the model")
+            self.notice(" · ".join(parts))
         elif kind == "tool_completed":
             if event.get("ok"):
                 self._write(self._paint(self.palette.green, "  ✓ tool completed"))
             else:
                 self.error(event.get("error", "Tool failed"))
+        elif kind == "output_saved":
+            lines = event.get("lines")
+            count = f" ({lines:,} line{'s' if lines != 1 else ''})" if type(lines) is int and lines >= 0 else ""
+            self._write(self._paint(self.palette.muted, f"  · long output saved{count}"))
         elif kind == "assistant":
             self._write(self._safe(event.get("text", "")), end="\n")
+        elif kind == "sandbox_protected_path_created":
+            paths = event.get("paths") if isinstance(event.get("paths"), list) else []
+            self.notice("Warning: the shell command created or replaced protected config paths: "
+                        f"{', '.join(str(path) for path in paths)}. Review them before trusting them.")
         elif kind == "recovered_tool":
             self.notice("Recovered an interrupted tool call; its outcome is unknown. It was not replayed.")
+        elif kind == "guidance_loaded" and event.get("via") == "jit":
+            self._write(self._paint(self.palette.muted, f"  · instructions loaded from {self._safe(event.get('path', ''), 300)}"))
         elif kind == "run_stopped":
             self.notice(f"Stopped: {event.get('reason', 'limit')}. Session saved.")
         elif kind == "run_completed":
-            self._write(self._paint(self.palette.green, "✓ Run completed"))
+            seconds = event.get("seconds")
+            timing = f" · {seconds:.1f}s" if isinstance(seconds, (int, float)) else ""
+            tools = event.get("tools", 0)
+            self._write(self._paint(self.palette.green, f"✓ Run completed · {tools} tool{'s' if tools != 1 else ''} · "
+                                                        f"{self._count(event.get('tokens', 0))} tokens{timing}"))
         elif kind == "run_failed":
             self.error(event.get("error", "Run failed"))
+
+    @staticmethod
+    def _count(value) -> str:
+        value = value if isinstance(value, int) else 0
+        return f"{value / 1_000_000:.1f}M" if value >= 1_000_000 else f"{value / 1000:.1f}k" if value >= 1000 else str(value)
 
     def notice(self, text) -> None:
         self._write(self._paint(self.palette.yellow, self._safe(text, 8_000)))
@@ -174,7 +220,11 @@ class Terminal:
         self._write("  /new               Start a new session")
         self._write("  /sessions          List saved sessions")
         self._write("  /resume ID         Resume a saved session")
+        self._write("  /checkpoints       List this session's workspace checkpoints")
+        self._write("  /rewind [N|ck-ID]  Restore code, conversation, or both to a checkpoint")
+        self._write("  /diff [N|ck-ID]    Show file changes since a checkpoint")
         self._write("  /status            Show workspace, model, and permission context")
+        self._write("  /instructions      List instruction files (EIRA.md, AGENTS.md, ...) in load order")
         self._write("  /clear             Clear the visible terminal")
         self._write("  /exit              Leave chat")
 

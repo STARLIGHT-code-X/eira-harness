@@ -12,9 +12,10 @@ from . import __version__
 from .agent import Agent, Limits
 from .demo import DemoProvider, sample_csv
 from .finance import backtest, markdown_report
-from .provider import build_provider
-from .security import HarnessError, Redactor, Workspace, atomic_write, clean_terminal, approval_text
+from .provider import DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MODEL_TIMEOUT, MAX_MODEL_TIMEOUT, build_provider
+from .security import HarnessError, Redactor, Workspace, atomic_write, clean_terminal, approval_text, redact_tree
 from .store import Store
+from .syntax import parse_lint
 from .tools import Policy, Toolbox
 
 
@@ -32,6 +33,63 @@ def approve(name: str, detail: str) -> bool:
     return sys.stdin.readline().strip().lower() == "y"
 
 
+def compact_count(value) -> str:
+    value = value or 0
+    return f"{value / 1_000_000:.1f}M" if value >= 1_000_000 else f"{value / 1000:.1f}k" if value >= 1000 else str(value)
+
+
+def run_summary(event) -> str:
+    parts = [f"{event.get('tools', 0)} tool{'s' if event.get('tools') != 1 else ''}",
+             f"{compact_count(event.get('tokens'))} tokens"]
+    if event.get("seconds") is not None:
+        parts.append(f"{event['seconds']:.1f}s")
+    return " · ".join(parts)
+
+
+def provider_options(args) -> dict:
+    return {"timeout": getattr(args, "model_timeout", DEFAULT_MODEL_TIMEOUT),
+            "max_output_tokens": getattr(args, "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+            "prompt_cache": not getattr(args, "no_prompt_cache", False)}
+
+
+def limits_from(args) -> Limits:
+    return Limits(
+        max_steps=args.max_steps,
+        max_tool_calls=args.max_tool_calls,
+        max_context_chars=args.max_context_chars,
+        max_total_tokens=args.max_tokens,
+        instructions=getattr(args, "instructions", None) or ("workspace" if args.command == "eval" else "all"),
+        compact=not args.no_compact,
+        checkpoints=not args.no_checkpoints,
+    )
+
+
+def policy_from(args) -> Policy:
+    return Policy(
+        approve=approve,
+        approve_writes=args.approve_writes,
+        read_only=args.read_only,
+        allowed_hosts={h.lower() for h in args.allow_host},
+        shell_mode=args.shell,
+        shell_approval=args.shell_approval,
+        docker_image=args.docker_image,
+        allowed_data_sources=set(args.allow_data_source),
+        syntax_guard=args.syntax_guard,
+        lint_commands=parse_lint(args.lint_cmd),
+    )
+
+
+def shell_status(args) -> str:
+    if args.shell != 'docker':
+        return 'disabled'
+    if args.read_only:
+        return 'denied by read-only policy'
+    if args.shell_approval == 'sandboxed':
+        return ('commands run automatically inside the protected sandbox; '
+                'destructive commands and trust-handoff alerts still ask')
+    return 'approve each command'
+
+
 def renderer(as_json: bool):
     def emit(event):
         if as_json:
@@ -41,13 +99,25 @@ def renderer(as_json: bool):
         if kind == "run_started":
             print_safe(f"\nEIRA / {event['model']}\nSession {event['session']}\n", file=sys.stderr)
         elif kind == "tool_started":
-            print_safe(f"  → {event['name']}", file=sys.stderr)
+            detail = f"  {event['detail']}" if event.get("detail") else ""
+            print_safe(f"  → {event['name']}{detail}", file=sys.stderr)
         elif kind == "tool_completed" and not event["ok"]:
             print_safe(f"  ! {event['error']}", file=sys.stderr)
+        elif kind == "sandbox_protected_path_created":
+            print_safe(f"  ! shell command created or replaced protected config paths: {', '.join(event['paths'])}. "
+                       "Review them before trusting them.", file=sys.stderr)
+        elif kind == "compaction_started":
+            print_safe("  · compacting context…", file=sys.stderr)
+        elif kind == "context_compacted":
+            print_safe(f"  · context compacted: {event['replaced_messages']} messages summarized; originals stay in the trace", file=sys.stderr)
+        elif kind in {"checkpoint_failed", "checkpoint_skipped"}:
+            print_safe(f"  ! no checkpoint for this step ({event['reason']}); continuing", file=sys.stderr)
         elif kind == "assistant":
             print_safe(event["text"])
+        elif kind == "run_completed":
+            print_safe(f"\n✓ {run_summary(event)}", file=sys.stderr)
         elif kind == "run_stopped":
-            print_safe(f"Stopped: {event['reason']}. Session saved.", file=sys.stderr)
+            print_safe(f"Stopped: {event['reason']}. Session saved. {run_summary(event)}", file=sys.stderr)
         elif kind == "recovered_tool":
             print_safe("Recovered an interrupted tool call; its outcome is unknown. It was not replayed.", file=sys.stderr)
     return emit
@@ -61,22 +131,45 @@ def build_parser():
     def workspace(command):
         command.add_argument("--workspace", type=Path, default=Path.cwd(), help="Workspace directory (default: current directory)")
 
-    def model_options(command):
-        workspace(command)
+    def provider_flags(command):
         command.add_argument("--model", default=None)
         command.add_argument("--provider", choices=["openai", "anthropic", "openrouter", "gemini", "ollama", "custom"], default=None)
         command.add_argument("--base-url", default=None)
+        command.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS,
+                             help="Per-response output cap sent to the Anthropic profile (default %(default)s)")
+        command.add_argument("--model-timeout", type=int, default=DEFAULT_MODEL_TIMEOUT,
+                             help=f"Seconds allowed per model request, including retries (max {MAX_MODEL_TIMEOUT})")
+        command.add_argument("--no-prompt-cache", action="store_true", help="Do not send prompt-cache markers to Anthropic")
+
+    def limit_flags(command):
+        command.add_argument("--max-steps", type=int, default=20)
+        command.add_argument("--max-tool-calls", type=int, default=50)
+        command.add_argument("--max-tokens", type=int, default=100_000, help="Cumulative reported usage; checked between requests, not a hard billing cap")
+        command.add_argument("--max-context-chars", type=int, default=120_000)
+        command.add_argument("--instructions", choices=["all", "workspace", "none"], default=None,
+                             help="Instruction files to load: global, project and workspace (all; default except eval), "
+                                  "workspace only (default for eval), or none")
+        command.add_argument("--no-compact", action="store_true", help="Stop at the context limit instead of summarizing older turns")
+        command.add_argument("--no-checkpoints", action="store_true", help="Do not snapshot the workspace before file-changing tools")
+
+    def model_options(command):
+        workspace(command)
+        provider_flags(command)
         command.add_argument("--allow-data-source", action="append", choices=["alphavantage", "coinbase"], default=[], help="Preapprove a native daily-price source")
         command.add_argument("--session", help="Resume a session from this workspace")
         command.add_argument("--read-only", action="store_true", help="Deny file writes, memory writes, and shell calls")
         command.add_argument("--approve-writes", action="store_true", help="Preapprove workspace file and memory writes; never shell/network")
         command.add_argument("--allow-host", action="append", default=[], help="Preapprove HTTPS GET requests to this exact hostname (repeatable)")
         command.add_argument("--shell", choices=["disabled", "docker"], default="disabled")
+        command.add_argument("--shell-approval", choices=["always", "sandboxed"], default="always",
+                             help="always: approve each shell command (default). sandboxed: run commands in the protected "
+                                  "Docker sandbox without asking; destructive commands and trust-handoff alerts still ask")
         command.add_argument("--docker-image", default="python:3.11-slim", help="Pre-pulled Docker image for shell mode")
-        command.add_argument("--max-steps", type=int, default=20)
-        command.add_argument("--max-tool-calls", type=int, default=50)
-        command.add_argument("--max-tokens", type=int, default=100_000, help="Cumulative reported usage; checked between requests, not a hard billing cap")
-        command.add_argument("--max-context-chars", type=int, default=120_000)
+        command.add_argument("--syntax-guard", choices=["reject", "warn", "off"], default="reject",
+                             help="Reject edits that break Python, JSON or TOML syntax (default), only warn, or skip checks")
+        command.add_argument("--lint-cmd", action="append", default=[], metavar="GLOB=COMMAND",
+                             help="After a write, run COMMAND in the Docker sandbox for matching files; {path} is the file (repeatable)")
+        limit_flags(command)
         command.add_argument("--json", action="store_true", help="Emit JSONL events to stdout")
 
     run = sub.add_parser("run", help="Run one task")
@@ -97,9 +190,30 @@ def build_parser():
     trace = sub.add_parser("trace", help="Export a session's conversation and event journal as JSON")
     workspace(trace)
     trace.add_argument("session")
+    checkpoints = sub.add_parser("checkpoints", help="List a session's workspace checkpoints")
+    workspace(checkpoints)
+    checkpoints.add_argument("--session", help="Session ID (default: the session with the latest checkpoint)")
+    checkpoints.add_argument("--json", action="store_true")
+    diff = sub.add_parser("diff", help="Show workspace changes since a checkpoint")
+    workspace(diff)
+    diff.add_argument("checkpoint", nargs="?", help="ck-<id> or turn:N (default: the session's first checkpoint)")
+    diff.add_argument("--session", help="Session ID (default: the session with the latest checkpoint)")
+    diff.add_argument("--stat", action="store_true", help="List changed files with line counts only")
+    rewind = sub.add_parser("rewind", help="Restore code, conversation, or both to a checkpoint")
+    workspace(rewind)
+    rewind.add_argument("target", help="ck-<id> or turn:N")
+    rewind_mode = rewind.add_mutually_exclusive_group(required=True)
+    for flag in ("code", "conversation", "both"):
+        rewind_mode.add_argument(f"--{flag}", dest="mode", action="store_const", const=flag)
+    rewind.add_argument("--yes", action="store_true", help="Skip the confirmation prompt (for scripts)")
+    rewind.add_argument("--session", help="Session ID (default: the session with the latest checkpoint)")
     memory = sub.add_parser("memory", help="List or remove workspace memory")
     workspace(memory)
     memory.add_argument("--forget", metavar="KEY")
+    listing = sub.add_parser("instructions", help="List the instruction files (EIRA.md, AGENTS.md, ...) Eira would load")
+    workspace(listing)
+    listing.add_argument("--instructions", choices=["all", "workspace", "none"], default="all")
+    listing.add_argument("--json", action="store_true")
     bt = sub.add_parser("backtest", help="Backtest a daily date,close CSV without a model")
     workspace(bt)
     bt.add_argument("csv", help="Workspace-relative CSV path")
@@ -112,6 +226,23 @@ def build_parser():
     bt.add_argument("--max-drawdown", type=float, default=.20)
     bt.add_argument("--periods-per-year", type=int, default=252)
     bt.add_argument("--output", help="New workspace-relative .json or .md report (never overwrites)")
+    evaluate = sub.add_parser("eval", help="Score a model on a task suite in throwaway workspaces")
+    workspace(evaluate)
+    evaluate.add_argument("suite", nargs="?", default="starter",
+                          help="Workspace-relative suite JSON, 'starter' (default), or 'coding' (needs Docker)")
+    provider_flags(evaluate)
+    limit_flags(evaluate)
+    evaluate.add_argument("--repeat", type=int, default=1, help="Run every task this many times (1–20)")
+    evaluate.add_argument("--work-dir", type=Path, help="Keep task workspaces under this directory (relative to --workspace)")
+    evaluate.add_argument("--output", help="Write the JSON report to a new workspace-relative file")
+    evaluate.add_argument("--dump-suite", action="store_true", help="Print the suite as JSON without running it")
+    evaluate.add_argument("--json", action="store_true", help="Print only the JSON report")
+    evaluate.add_argument("--jobs", type=int, default=1, help="Run up to this many tasks at once (1–8)")
+    evaluate.add_argument("--docker-image", help="Pre-pulled image for command checks and agent shells (overrides the suite's)")
+    evaluate.add_argument("--harness", choices=["eira", "codex"], default="eira",
+                          help="Run the tasks through Eira or through `codex exec` with the same checks")
+    evaluate.add_argument("--codex-model", help="Model passed to codex exec -m (default: Codex's own)")
+    evaluate.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), help="Compare two reports and exit")
     sub.add_parser("providers", help="List model provider profiles and credential variables")
     prices = sub.add_parser("prices", help="Download daily prices from a fixed financial-data source")
     workspace(prices)
@@ -162,7 +293,7 @@ def configure_model(args, ui, force=False, choose_provider=True):
         key = getpass.getpass(f'{key_env} (Enter to skip): ')
         if key:
             os.environ[key_env] = key
-    provider = build_provider(selected, model, endpoint)
+    provider = build_provider(selected, model, endpoint, **provider_options(args))
     save_settings(selected, model, endpoint)
     args.provider, args.model, args.base_url = selected, model, endpoint
     ui.notice('Model preferences saved. API keys are read from the environment or entered privately each launch.')
@@ -172,6 +303,8 @@ def configure_model(args, ui, force=False, choose_provider=True):
 def run_agent(args, store, workspace):
     if args.read_only and args.approve_writes:
         raise HarnessError('Choose either --read-only or --approve-writes.')
+    if args.shell_approval == 'sandboxed' and args.shell != 'docker':
+        raise HarnessError('--shell-approval sandboxed requires --shell docker')
     interactive = args.command == 'chat'
     if interactive and not sys.stdin.isatty():
         raise HarnessError('Chat requires an interactive terminal; use Eira run "your task" for scripts.')
@@ -181,16 +314,14 @@ def run_agent(args, store, workspace):
         ui = Terminal()
     session = args.session or store.create(args.prompt if not interactive else 'Interactive session')
     store.require(session)
-    policy = Policy(approve=approve, approve_writes=args.approve_writes, read_only=args.read_only,
-                    allowed_hosts={h.lower() for h in args.allow_host}, shell_mode=args.shell,
-                    docker_image=args.docker_image, allowed_data_sources=set(args.allow_data_source))
-    limits = Limits(max_steps=args.max_steps, max_tool_calls=args.max_tool_calls,
-                    max_context_chars=args.max_context_chars, max_total_tokens=args.max_tokens)
+    policy = policy_from(args)
+    limits = limits_from(args)
     provider = None
 
     def banner():
         ui.banner(workspace.root, args.provider, args.model or 'Not configured', session,
-                  read_only=args.read_only, shell=args.shell)
+                  read_only=args.read_only,
+                  shell=args.shell + (' (auto in sandbox)' if args.shell_approval == 'sandboxed' else ''))
         if args.approve_writes:
             ui.notice('Workspace file and memory writes are preapproved for this session.')
 
@@ -201,7 +332,7 @@ def run_agent(args, store, workspace):
                 provider = configure_model(args, ui)
             else:
                 try:
-                    provider = build_provider(args.provider, args.model, args.base_url)
+                    provider = build_provider(args.provider, args.model, args.base_url, **provider_options(args))
                 except HarnessError:
                     provider = configure_model(args, ui)
         except HarnessError as exc:
@@ -209,7 +340,7 @@ def run_agent(args, store, workspace):
             ui.notice('Use /model to finish setup, /help for commands, or /exit to leave.')
         store.redact = Redactor()
     else:
-        provider = build_provider(args.provider, args.model, args.base_url)
+        provider = build_provider(args.provider, args.model, args.base_url, **provider_options(args))
 
     def make_agent():
         return Agent(provider, store, Toolbox(workspace, store, policy, session),
@@ -243,11 +374,16 @@ def run_agent(args, store, workspace):
                 ui.notice(f'Endpoint: {args.base_url or PROFILES[args.provider]["default_base_url"]}')
                 ui.notice(f'Writes: {"denied" if args.read_only else "preapproved" if args.approve_writes else "ask first"}\n'
                           f'Hosts: {", ".join(args.allow_host) or "ask first"}\n'
-                          f'Data sources: {", ".join(args.allow_data_source) or "ask first"}')
+                          f'Data sources: {", ".join(args.allow_data_source) or "ask first"}\n'
+                          f'Shell: {shell_status(args)}\n'
+                          f'Context: {args.max_context_chars:,} characters; '
+                          f'{"compaction off" if args.no_compact else "older turns are summarized near the limit"}')
             elif command == '/sessions':
                 recent = store.sessions()[:20]
                 ui.notice('\n'.join(f'{s["id"]}  {s["title"]}' for s in recent) or 'No saved sessions.')
                 ui.notice('Resume with /resume SESSION_ID')
+            elif command in {'/checkpoints', '/rewind', '/diff'}:
+                chat_checkpoints(command, argument, store, workspace, session, ui)
             elif command == '/resume':
                 store.require(argument)
                 session = argument
@@ -266,6 +402,9 @@ def run_agent(args, store, workspace):
                     print('\033[2J\033[H', end='', file=sys.stderr, flush=True)
                 banner()
                 ui.notice('Display cleared; conversation history is retained. /new starts a fresh session.')
+            elif command == '/instructions':
+                from . import instructions
+                ui.notice(instructions.report(workspace, limits.instructions))
             elif command.startswith('/'):
                 ui.error('Unknown command. Type /help for available commands.')
             else:
@@ -280,6 +419,172 @@ def run_agent(args, store, workspace):
         finally:
             store.redact = Redactor()
     return 0
+
+
+def checkpoint_command(args, store, workspace):
+    from .checkpoints import Checkpoints
+    checkpoints = Checkpoints(store, workspace)
+    session = args.session or checkpoints.default_session()
+    if session is None:
+        if args.command == "checkpoints":
+            print_safe("[]" if args.json else "No checkpoints in this workspace yet.")
+            return 0
+        raise HarnessError("No checkpoints in this workspace yet.")
+    store.require(session)
+    if args.command == "checkpoints":
+        rows = checkpoints.listing(session)
+        print_safe(json.dumps(rows, indent=2) if args.json else f"Session {session}\n" + checkpoints.format_listing(rows))
+        return 0
+    if args.command == "diff":
+        print_safe(checkpoints.diff(session, args.checkpoint, stat_only=args.stat))
+        return 0
+
+    def confirm(summary):
+        print_safe(summary, file=sys.stderr)
+        if args.yes:
+            return True
+        if not sys.stdin.isatty():
+            raise HarnessError("Rewind needs confirmation: run it in a terminal, or pass --yes in scripts.")
+        print("\nRewind now? [y/N] ", end="", file=sys.stderr, flush=True)
+        return sys.stdin.readline().strip().lower() == "y"
+
+    result = checkpoints.rewind(session, args.target, args.mode, confirm)
+    if result is None:
+        print_safe("Rewind cancelled; nothing changed.", file=sys.stderr)
+        return 1
+    print_safe(rewind_message(result), file=sys.stderr)
+    return 0
+
+
+def rewind_message(result) -> str:
+    parts = [f"Rewound {result['mode']} to {result['checkpoint']}"]
+    if result["mode"] != "conversation":
+        parts.append(f"{result['restored']} restored, {result['deleted']} deleted"
+                     + (f"; undo with: eira rewind {result['backup']} --code" if result.get("backup") else ""))
+    if result["mode"] != "code":
+        parts.append(f"{result['hidden_messages']} messages hidden from the model")
+    text = " · ".join(parts)
+    if result.get("prompt") and result["mode"] != "code":
+        text += "\nOriginal prompt:\n" + result["prompt"]
+    return text
+
+
+def chat_checkpoints(command, argument, store, workspace, session, ui):
+    """/checkpoints, /diff and /rewind for the current chat session."""
+    from .checkpoints import Checkpoints
+    checkpoints = Checkpoints(store, workspace)
+    if command == '/checkpoints':
+        ui.notice(checkpoints.format_listing(checkpoints.listing(session)))
+        return
+    if command == '/diff':
+        ui.notice(checkpoints.diff(session, argument or None))
+        return
+    if not argument:
+        ui.notice(checkpoints.format_listing(checkpoints.listing(session)))
+        ui.notice('Rewind with /rewind N (a turn number) or /rewind ck-ID.')
+        return
+
+    def ask(label):
+        print(clean_terminal(label), end='', file=sys.stderr, flush=True)
+        return input().strip().lower()
+
+    choice = ask('Restore [c]ode, con[v]ersation, [b]oth, or [n]othing? ')
+    mode = {'c': 'code', 'v': 'conversation', 'b': 'both'}.get(choice[:1])
+    if mode is None:
+        ui.notice('Rewind cancelled; nothing changed.')
+        return
+
+    def confirm(summary):
+        ui.notice(summary)
+        return ask('Rewind now? [y/N] ') == 'y'
+
+    result = checkpoints.rewind(session, argument, mode, confirm, emit=ui.emit)
+    if result is None:
+        ui.notice('Rewind cancelled; nothing changed.')
+        return
+    if result.get('backup'):
+        ui.notice(f'Undo the file changes with /rewind {result["backup"]} (code).')
+    if mode != 'code' and result.get('prompt'):
+        # Like an edited resend: the original prompt is shown and Up recalls it.
+        recalled = Redactor()(result['prompt'])
+        ui.notice('Original prompt (press Up to edit and resend):\n' + recalled)
+        ui.history.append(recalled)
+        readline = getattr(ui, '_readline', None)
+        if readline is not None:
+            readline.add_history(recalled)
+
+
+def run_eval(args, workspace):
+    from .evals import compare_reports, load_suite, run_suite, suite_image
+    from .security import bounded_json_loads
+    from .settings import resolve_settings
+    if args.compare:
+        first, second = (bounded_json_loads(workspace.read(path, 50_000_000)) for path in args.compare)
+        print_safe(compare_reports(first, second))
+        return 0
+    suite = load_suite(args.suite, workspace)
+    if args.dump_suite:
+        print_safe(json.dumps(redact_tree(suite, Redactor()), indent=2, ensure_ascii=False))
+        return 0
+    target = None
+    if args.output:
+        target = workspace.path(args.output)
+        if target.suffix != ".json" or target.exists():
+            raise HarnessError("Choose a new .json report path; existing files are never overwritten.")
+        if not target.parent.is_dir() or not os.access(target.parent, os.W_OK):
+            raise HarnessError("The report directory must already exist and be writable.")
+    # Fail on configuration before any model call.
+    image = suite_image(suite, args.docker_image)
+    if args.harness == "codex":
+        from .harnesses import codex_binary
+        codex_binary()
+    resolve_settings(args)
+    limits = limits_from(args)
+    if any(isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0
+           for value in vars(limits).values()):
+        raise HarnessError("All runtime limits must be positive.")
+    if args.harness == "eira":
+        build_provider(args.provider, args.model, args.base_url, **provider_options(args))
+    work_dir = args.work_dir
+    if work_dir is not None and not work_dir.is_absolute():
+        work_dir = workspace.root / work_dir
+
+    def progress(result, done, total):
+        if args.json:
+            return
+        mark = "✓" if result["passed"] else "✗"
+        reason = "" if result["passed"] else "  " + (result.get("error") or ", ".join(
+            f"{c['type']}{' ' + c['path'] if 'path' in c else ''}" for c in result["checks"] if not c["passed"]))
+        print_safe(f"[{done}/{total}] {mark} {result['task']}  ({result['tool_calls']} tools, "
+                   f"{compact_count(result['tokens'])} tokens, {result['seconds']:.1f}s){reason}", file=sys.stderr)
+
+    if not args.json:
+        who = f"codex / {args.codex_model or 'default model'}" if args.harness == "codex" else f"{args.provider} / {args.model}"
+        print_safe(f"Eira eval · suite {suite['name']} · {who} · {len(suite['tasks'])} tasks × {args.repeat}"
+                   + (f" · {args.jobs} jobs" if args.jobs > 1 else ""), file=sys.stderr)
+    report = run_suite(suite, lambda: build_provider(args.provider, args.model, args.base_url, **provider_options(args)),
+                       limits, repeat=args.repeat, work_dir=work_dir, progress=progress, jobs=args.jobs,
+                       image=image, harness=args.harness, codex_model=args.codex_model)
+    report["provider"] = args.provider if args.harness == "eira" else "codex"
+    encoded = json.dumps(redact_tree(report, Redactor()), indent=2, ensure_ascii=False, allow_nan=False)
+    if target:
+        try:
+            atomic_write(target, encoded + "\n", overwrite=False)
+        except OSError as exc:
+            # Never lose a paid run: fall back to stdout (once, even with --json).
+            print_safe(f"Eira: could not write {target}: {exc}. The report follows on stdout.", file=sys.stderr)
+            if not args.json:
+                print_safe(encoded)
+            target = None
+    summary = report["summary"]
+    if args.json:
+        print_safe(encoded)
+    else:
+        low, high = summary["pass_rate_ci95"]
+        print_safe(f"\nPassed {summary['passed']}/{summary['runs']} ({summary['pass_rate']:.0%}, 95% CI {low:.0%}–{high:.0%}) · "
+                   f"{summary['tool_errors']} tool errors · {compact_count(summary['tokens'])} tokens · "
+                   f"{summary['seconds']:.1f}s" + (f"\nReport: {target}" if target else ""), file=sys.stderr)
+    return 0 if summary["passed"] == summary["runs"] else 1
 
 
 def main(argv=None):
@@ -297,6 +602,7 @@ def main(argv=None):
             args.workspace.mkdir(parents=True, exist_ok=True)
         workspace = Workspace(args.workspace)
         if args.command == "doctor":
+            from . import patch
             from .provider import PROFILES
             from .settings import resolve_settings
             selected = resolve_settings(argparse.Namespace(provider=None, model=None, base_url=None))
@@ -306,7 +612,8 @@ def main(argv=None):
                       "provider": selected.provider, "api_key_present": bool(os.getenv(key_env)),
                       "docker_available": bool(shutil.which("docker")),
                       "session_lock_supported": os.name == "posix",
-                      "live_provider_tested": False}
+                      "live_provider_tested": False,
+                      "incomplete_patches": patch.leftovers(workspace.root / ".eira")}
             print_safe(json.dumps(report, indent=2))
             return 0
         if args.command == "prices":
@@ -339,6 +646,8 @@ def main(argv=None):
             else:
                 print_safe(json.dumps(result, indent=2, allow_nan=False))
             return 0
+        if args.command == "eval":
+            return run_eval(args, workspace)
         if args.command in {"run", "chat", "setup"}:
             from .settings import resolve_settings
             resolve_settings(args)
@@ -367,12 +676,20 @@ def main(argv=None):
         elif args.command == "sessions":
             print_safe(json.dumps(store.sessions(), indent=2))
         elif args.command == "trace":
-            print_safe(json.dumps({"session": args.session, "messages": store.messages(args.session),
+            store.require(args.session)
+            frozen = store.session_context(args.session)
+            print_safe(json.dumps({"session": args.session, "system": frozen["system"] if frozen else None,
+                                   "messages": store.messages(args.session),
                                    "events": store.events(args.session)}, indent=2))
+        elif args.command in {"checkpoints", "diff", "rewind"}:
+            return checkpoint_command(args, store, workspace)
         elif args.command == "memory":
             if args.forget:
                 store.forget(args.forget)
             print_safe(json.dumps(store.memories(), indent=2))
+        elif args.command == "instructions":
+            from . import instructions
+            print_safe(instructions.report(workspace, args.instructions, as_json=args.json))
         else:
             return run_agent(args, store, workspace)
         return 0
@@ -380,7 +697,10 @@ def main(argv=None):
         print_safe("Setup closed. Run Eira again when ready.", file=sys.stderr)
         return 0
     except KeyboardInterrupt:
-        print_safe("Interrupted. Any started session was saved; in-flight tool outcomes may be unknown.", file=sys.stderr)
+        if args.command == "eval":
+            print_safe("Interrupted. Throwaway eval workspaces were removed unless --work-dir kept them.", file=sys.stderr)
+        else:
+            print_safe("Interrupted. Any started session was saved; in-flight tool outcomes may be unknown.", file=sys.stderr)
         return 130
     except (HarnessError, OSError, ValueError) as exc:
         if getattr(args, "json", False):

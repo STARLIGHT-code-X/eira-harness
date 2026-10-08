@@ -1,0 +1,188 @@
+"""Real-daemon checks for Docker shell mode.
+
+Skipped unless EIRA_DOCKER_IMAGE names a pre-pulled image with /bin/sh and
+python. Set EIRA_REQUIRE_DOCKER=1 (as CI does) to fail instead of skipping
+when the daemon or image is unavailable. For example:
+
+    EIRA_DOCKER_IMAGE=python:3.11-slim python3 -m unittest tests.test_docker_integration -v
+"""
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+from eira_harness.store import Store
+from eira_harness.security import HarnessError, Workspace
+from eira_harness.tools import Policy, Toolbox
+
+IMAGE = os.environ.get("EIRA_DOCKER_IMAGE", "")
+
+
+def daemon_ready() -> bool:
+    if not IMAGE or not shutil.which("docker"):
+        return False
+    probe = subprocess.run(["docker", "image", "inspect", IMAGE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return probe.returncode == 0
+
+
+READY = daemon_ready()
+REQUIRED = os.environ.get("EIRA_REQUIRE_DOCKER") == "1"
+
+
+def eira_containers() -> set[str]:
+    listed = subprocess.run(["docker", "ps", "-aq", "--filter", "name=^eira-"], capture_output=True, text=True)
+    return set(listed.stdout.split())
+
+
+class DockerRequirementTest(unittest.TestCase):
+    @unittest.skipUnless(REQUIRED, "EIRA_REQUIRE_DOCKER is not set")
+    def test_required_docker_is_available(self):
+        self.assertTrue(READY, f"EIRA_REQUIRE_DOCKER=1 but Docker or image {IMAGE!r} is unavailable")
+
+
+@unittest.skipUnless(READY, "set EIRA_DOCKER_IMAGE to a pre-pulled image to run Docker integration tests")
+class DockerShellIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.store = Store(self.root)
+        self.approved = []
+        policy = Policy(approve=lambda name, detail: self.approved.append(detail) or True,
+                        shell_mode="docker", docker_image=IMAGE)
+        self.tools = Toolbox(Workspace(self.root), self.store, policy, self.store.create("docker"))
+
+    def tearDown(self):
+        self.store.close()
+        self.temp.cleanup()
+
+    def sh(self, command, timeout=30):
+        return self.tools.call("shell", {"command": command, "timeout": timeout})
+
+    def test_command_runs_in_workspace_and_can_write_project_files(self):
+        result = self.sh("python -c 'print(6 * 7)' && pwd && echo made > out.txt")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertEqual(result["output"].split(), ["42", "/workspace"])
+        self.assertEqual((self.root / "out.txt").read_text(), "made\n")
+        self.assertIn("Mode: docker", self.approved[0])
+
+    def test_container_has_no_network_capabilities_or_writable_root(self):
+        result = self.sh("python - <<'EOF'\n"
+                         "import socket\n"
+                         "try:\n"
+                         "    socket.create_connection(('1.1.1.1', 443), timeout=3)\n"
+                         "    print('network: open')\n"
+                         "except OSError:\n"
+                         "    print('network: blocked')\n"
+                         "status = dict(l.split(':', 1) for l in open('/proc/self/status'))\n"
+                         "print(status['CapEff'].strip(), status['CapBnd'].strip())\n"
+                         "root = [l.split()[3].split(',') for l in open('/proc/mounts') if l.split()[1] == '/']\n"
+                         "print('root:', 'ro' if 'ro' in root[-1] else 'rw')\n"
+                         "EOF")
+        self.assertEqual(result["exit_code"], 0, result)
+        # The bounding set and mount flags hold regardless of the container
+        # user, so these checks are meaningful for root and non-root runs.
+        self.assertEqual(result["output"].split("\n")[:3],
+                         ["network: blocked", "0000000000000000 0000000000000000", "root: ro"])
+
+    def test_eira_state_is_hidden_from_commands(self):
+        self.assertTrue((self.root / ".eira" / "state.db").exists())
+        # The tmpfs over .eira is root-owned with mode 0700: empty to a root
+        # container user, unlistable to anyone else. Either way the host's
+        # journal must be neither visible nor readable.
+        result = self.sh("if test -e .eira/state.db; then echo visible; else echo hidden; fi; "
+                         "if cat .eira/state.db >/dev/null 2>&1; then echo readable; else echo unreadable; fi")
+        self.assertEqual(result["output"].split(), ["hidden", "unreadable"])
+
+    def test_timeout_and_output_limits_stop_and_remove_container(self):
+        before = eira_containers()
+        result = self.sh("sleep 20", timeout=2)
+        self.assertEqual(result["stopped"], "timeout")
+        result = self.sh("python -c \"import sys; sys.stdout.write('x' * 5000000)\"")
+        self.assertEqual(result["stopped"], "output_limit")
+        self.assertTrue(result["truncated"])
+        self.assertEqual(eira_containers() - before, set())
+
+    def protected_fixture(self):
+        files = {".env": "SECRET=fixture\n", ".ssh/id_rsa": "key\n", ".git/hooks/pre-commit": "original\n",
+                 ".git/HEAD": "ref: refs/heads/main\n", "AGENTS.md": "rules\n", ".devcontainer/devcontainer.json": "{}\n",
+                 ".devcontainer/.env": "DEV=secret\n", ".github/workflows/ci.yml": "on: push\n",
+                 ".git/config": "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://u:ghp_fixture@github.com/x/y\n"}
+        for relative, text in files.items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        (self.root / "src").mkdir()
+        (self.root / ".git" / "objects").mkdir()
+        (self.root / ".git" / "refs").mkdir()
+
+    def test_secrets_are_masked_and_config_is_read_only(self):
+        self.protected_fixture()
+        before = eira_containers()
+        result = self.sh("cat .env")
+        self.assertEqual((result["exit_code"], result["output"]), (0, ""))
+        self.assertIn("secret paths hidden", self.approved[-1])
+        result = self.sh("echo x > .git/hooks/pre-commit")
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertIn("Read-only file system", result["output"])
+        self.assertEqual((self.root / ".git/hooks/pre-commit").read_text(), "original\n")
+        result = self.sh("ls -A .ssh 2>/dev/null; echo end")
+        self.assertEqual(result["output"], "end\n")
+        result = self.sh("echo x >> AGENTS.md")
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertIn("Read-only file system", result["output"])
+        self.assertEqual((self.root / "AGENTS.md").read_text(), "rules\n")
+        result = self.sh("echo x > .github/workflows/evil.yml")
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertFalse((self.root / ".github/workflows/evil.yml").exists())
+        # A secret inside a read-only config directory is masked too.
+        result = self.sh("cat .devcontainer/.env; cat .devcontainer/devcontainer.json")
+        self.assertEqual((result["exit_code"], result["output"]), (0, "{}\n"))
+        result = self.sh("cat .git/config")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertNotIn("ghp_fixture", result["output"])
+        self.assertIn("url = https://github.com/x/y", result["output"])
+        result = self.sh("echo ok > src/new.txt && echo $HOME $GIT_OPTIONAL_LOCKS $PAGER")
+        self.assertEqual((result["exit_code"], result["output"]), (0, "/tmp 0 cat\n"))
+        self.assertEqual((self.root / "src/new.txt").read_text(), "ok\n")
+        result = self.sh("if command -v git >/dev/null; then git status --porcelain >/dev/null && echo status-ok; "
+                         "else echo no-vcs-tool; fi")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertIn(result["output"].strip(), {"status-ok", "no-vcs-tool"})
+        self.assertEqual(eira_containers() - before, set())
+        self.assertFalse((self.root / ".eira" / "sandbox").exists() and any((self.root / ".eira" / "sandbox").iterdir()))
+
+    def test_created_protected_path_is_reported(self):
+        result = self.sh("mkdir .vscode && echo {} > .vscode/tasks.json")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertEqual(result["protected_paths_created"], [".vscode"])
+        self.assertEqual(self.tools.shell_alerts, [".vscode"])
+    def test_sandboxed_mode_runs_without_approval_and_keeps_isolation(self):
+        self.tools.policy.shell_approval = "sandboxed"
+        self.tools.policy.approve = lambda name, detail: self.fail("sandboxed mode asked for approval")
+        if importlib.util.find_spec("eira_harness.sandbox") is None:
+            # Until shell-protected-paths merges, stand in for its plan contract.
+            plan = self.tools._shell_plan
+            self.tools._shell_plan = lambda command, timeout: {**plan(command, timeout), "protected": True}
+        result = self.sh("python -c 'print(6*7)' && python - <<'EOF'\n"
+                         "import socket\n"
+                         "try:\n"
+                         "    socket.create_connection(('1.1.1.1', 443), timeout=3)\n"
+                         "    print('network: open')\n"
+                         "except OSError:\n"
+                         "    print('network: blocked')\n"
+                         "EOF")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertEqual(result["output"].split("\n")[:2], ["42", "network: blocked"])
+
+    def test_denied_command_never_starts_a_container(self):
+        self.tools.policy.approve = lambda name, detail: False
+        with self.assertRaises(HarnessError):
+            self.sh("echo should-not-run > denied.txt")
+        self.assertFalse((self.root / "denied.txt").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

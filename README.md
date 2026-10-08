@@ -4,7 +4,7 @@
 
 Eira gives a tool-capable language model a working directory, an execution loop, durable sessions, reviewed file edits, and financial research tools. You choose the model and endpoint. Conversations and tool traces stay in a local SQLite database; relevant conversation content is sent to the model endpoint you configure.
 
-This is a working **v0.3 developer release**, inspired by the general-agent and financial-workflow scope of Minara Harness. It is independently implemented. It does not claim Minara feature parity or benchmark superiority.
+This is a working **v0.5 developer release**, inspired by the general-agent and financial-workflow scope of Minara Harness. It is independently implemented. It does not claim Minara feature parity or benchmark superiority.
 
 ```text
 EIRA / offline-scripted-demo
@@ -18,6 +18,8 @@ maximum drawdown 5.93%; 4 round trips after fees and slippage.
 ```
 
 The example above is a deterministic demo on synthetic prices, not evidence of investment performance or an LLM evaluation.
+
+New to Eira? [docs/OVERVIEW.md](docs/OVERVIEW.md) is a one-page outline of what it is, how it works, and where it stops.
 
 ## Install with curl
 
@@ -50,8 +52,12 @@ The terminal has a frost-and-lavender welcome panel, workspace and permission co
 | `/new` | Start a fresh conversation |
 | `/sessions` / `/resume ID` | Find and resume workspace conversations |
 | `/status` | Show the current endpoint and permissions |
+| `/instructions` | List the instruction files loaded for this workspace |
+| `/checkpoints` / `/diff` / `/rewind` | List workspace checkpoints, show changes, and restore code or conversation |
 | `/clear` | Clear the display while retaining history |
 | `/exit` | Leave chat |
+
+Repositories set up for other agents work out of the box: alongside `EIRA.md`, Eira reads `AGENTS.md` (and `AGENTS.override.md`) as Codex does, falls back to `CLAUDE.md` or `GEMINI.md`, and walks from the git root down to the workspace. Instruction files in subdirectories are delivered the first time the model works there. Run `Eira instructions` to see what is loaded and why; `--instructions workspace` or `none` limits it. See [docs/INSTRUCTIONS.md](docs/INSTRUCTIONS.md).
 
 Ctrl+C during a task interrupts it and returns to the prompt; Ctrl+C at the prompt exits. Existing tool approval rules remain in effect. Switching providers retains the conversation and sends that history to the newly selected endpoint on your next task; use `/new` for a fresh conversation.
 
@@ -61,7 +67,7 @@ Eira --shell docker                    # approved commands in Docker
 Eira run 'Explain this project.'       # one task, also usable in scripts
 ```
 
-This interface is an improvement to Eira's local harness. Streaming model tokens, a full-screen editor, automatic context compaction, MCP, and coding-agent benchmark parity are not included in this release.
+Long sessions keep working: the session prefix is frozen so provider prompt caches stay warm, and near the context limit Eira summarizes older turns and continues, keeping every original message in the local trace. Streaming model tokens, a full-screen editor, MCP, and coding-agent benchmark parity are not included in this release.
 
 ## Try it immediately
 
@@ -117,9 +123,14 @@ HTTPS is required for remote model endpoints. HTTP is accepted only for loopback
 | Capability | Implementation |
 |---|---|
 | Agent execution | Sequential tool loop, schema validation, bounded steps/calls/context/reported tokens |
-| Models | OpenAI, Anthropic, OpenRouter, Gemini, Ollama, and custom endpoints |
-| Coding | File listing, literal search, reading, reviewed create/replace with stale-content checks |
-| Execution | Disabled by default; per-command approval in Docker |
+| Models | OpenAI, Anthropic (thinking blocks, prompt caching), OpenRouter, Gemini, Ollama, and custom endpoints |
+| Coding | `apply_patch` (Codex patch format, multi-file, all-or-nothing with rollback), exact-match `edit_file`, paged reads, regex search in a killable worker with context lines and `.gitignore`, a pre-approval syntax guard for Python/JSON/TOML, and optional sandboxed lint feedback |
+| Undo | Content-addressed checkpoints before every file-changing batch, including shell commands; `eira rewind` restores code, conversation, or both, without touching `.git` |
+| Instructions | `AGENTS.md`, `EIRA.md`, `CLAUDE.md` and `GEMINI.md` discovered from the global config down to the workspace; subdirectory guidance delivered with the first tool result that touches it |
+| Long sessions | Frozen per-session prefix, append-only history, summary compaction with originals preserved |
+| Evaluation | `eira eval`: declarative and behavioral (`command_succeeds` in the sandbox) checks, a built-in `coding` suite, pass@k and 95% intervals, parallel `--jobs`, and `--harness codex` with `--compare` to score Codex CLI on the same tasks |
+| Execution | Disabled by default. Docker sandbox with no network, no capabilities, a read-only root, secrets masked and VCS/CI/agent config read-only; per-command approval, or `--shell-approval sandboxed` to run protected commands without prompts (destructive ones still ask). Integration-tested against a real daemon |
+| Output | Head and tail of long output kept, so failures at the end survive; the full redacted output is saved and paged with `read_output` |
 | Financial data | Daily stock CSV from Alpha Vantage; daily crypto CSV from Coinbase |
 | Research | Approved public HTTPS URL fetching, textual extraction, source URLs |
 | Strategy testing | Long/cash SMA crossover on daily CSV bars, costs, exposure limit, drawdown stop |
@@ -128,7 +139,7 @@ HTTPS is required for remote model endpoints. HTTP is accepted only for loopback
 | Recovery | Interrupted tool outcomes marked unknown; no automatic side-effect replay |
 | Extensibility | Python provider interface and validated tool registry |
 
-**Not implemented:** autonomous web search, browser/desktop control, MCP transport, scheduled jobs, multi-agent delegation, streaming market feeds, forward paper trading, brokerage/wallet execution, or production-grade security isolation. The roadmap is in [docs/ROADMAP.md](docs/ROADMAP.md).
+**Not implemented:** token streaming, autonomous web search, browser/desktop control, MCP transport, scheduled jobs, multi-agent delegation, streaming market feeds, forward paper trading, brokerage/wallet execution, or production-grade security isolation. The roadmap is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Coding and approvals
 
@@ -143,15 +154,29 @@ Docker must be installed and the image must already be pulled:
 docker pull python:3.11-slim
 ```
 
-Every shell command displays JSON-escaped review text that preserves invisible characters and requires `y` from an interactive terminal. Docker mode runs as your UID, drops capabilities, disables container networking, limits CPU/memory/processes, makes the container filesystem read-only, and mounts the workspace writable. It does not pull images automatically. Choose an image containing your project's tools with `--docker-image`.
+By default, every shell command displays JSON-escaped review text that preserves invisible characters and requires `y` from an interactive terminal. Docker mode runs as your UID, drops capabilities, disables container networking, limits CPU/memory/processes, makes the container filesystem read-only, and mounts the workspace writable. It does not pull images automatically. Choose an image containing your project's tools with `--docker-image`.
 
-Host shell mode is removed in v0.2. Approved Docker commands can still access the mounted workspace; use a dedicated project directory without secrets. The file-tool restrictions do not constrain arbitrary approved shell code. Docker execution has not been integration-tested against a daemon in this development environment.
+Inside the container, secret files that the file tools block (such as `.env` and keys) read as empty. VCS metadata, agent instructions, and IDE, hook and CI config are read-only, and the approval text summarizes these protections; see [the sandbox mount plan](docs/SANDBOX.md) for the exact lists and what remains writable.
 
-File edits show a unified diff as JSON-escaped lines before approval. Files with recognized secret values are marked uneditable to prevent redaction placeholders from corrupting them. Existing files require a SHA-256 from `read_file`; concurrent edits cancel the write. New files require `expected_sha256: "new"`.
+Host shell mode is removed in v0.2. Approved Docker commands can still access the mounted workspace; use a dedicated project directory without secrets. The file-tool restrictions do not constrain arbitrary approved shell code. `tests/test_docker_integration.py` runs the real shell tool against a Docker daemon in CI and checks the network, capability, read-only-root, state-hiding, timeout, output-limit, and cleanup behavior described here.
+
+`edit_file` replaces an exact, unique piece of text, so the model sends only the change; `write_file` creates files or replaces a whole file. File edits show a unified diff as JSON-escaped lines before approval. Files with recognized secret values are marked uneditable to prevent redaction placeholders from corrupting them. `write_file` requires the SHA-256 from `read_file` for existing files and `expected_sha256: "new"` for new ones; `edit_file` accepts the hash optionally and always rechecks the file after approval. Concurrent edits cancel the write. Large files are read in pages; the hash always covers the whole file.
+
+`list_files` shows safe dotfiles such as `.github/workflows` and `.pre-commit-config.yaml`, honors `.gitignore`, skips dependency and cache directories, and pages large repositories with `offset` and `next_offset`; pass `ignored: true` to include ignored files. Credential, state and VCS paths are never listed or searched, whatever the flags. `search_files` matches literal text or, with `regex: true`, a Python regular expression run in a separate, killable interpreter with a 10-second timeout. It can add `context` lines, return per-file counts (`output: "files"`) or totals (`"count"`), and reports every skipped file by reason. Only the workspace's `.gitignore` files are read, not `.git/info/exclude` or a global excludes file. Every tool numbers lines the same way: only `\n`, `\r\n` and `\r` end a line. See [docs/CODE-SEARCH.md](docs/CODE-SEARCH.md).
+Every edit to a Python, JSON or TOML file is parsed before approval. An edit that breaks a file that parsed is refused, and the file is unchanged. The error shows the failing line inside its enclosing `class` and `def`. New files and files that were already broken get a warning instead, so dialects such as JSONC and newer Python syntax are not blocked. `--syntax-guard warn` downgrades refusals to warnings and `off` disables the check. `--lint-cmd '*.py=ruff check --quiet {path}'` runs a linter in the Docker sandbox after each write and returns its output to the model; a lint run needs the same approval as any shell command. See [edit checks](docs/CHECKS.md).
 
 For controlled automation, `--approve-writes` preapproves workspace file and memory changes. It never preapproves shell commands or network requests. `--read-only` denies file/memory writes and shell calls; it still saves session history. Prompts and tool data still go to your selected model endpoint.
 
 When stdin is piped, approvals fail closed. Use explicit write/hostname flags for intended automation. There is no global `--yes` or automatic host-shell approval.
+
+For an autonomous test-fix loop, `--shell-approval sandboxed` runs container commands without a prompt, but only while the protected mount plan is active. Destructive commands, such as `rm -rf .` or `git clean -fdx`, still ask, and so does the next command after one creates protected config such as `.vscode/`. A headless run denies those. File edits keep their own approval:
+
+```bash
+eira run 'Run the tests, fix the failures, and repeat until they pass.' \
+  --workspace /path/to/project --shell docker --shell-approval sandboxed --approve-writes
+```
+
+Commands that run automatically can still change unprotected workspace files. Use a project under version control, and enable checkpoints if available so automatic changes can be reverted. The rules, alerts and limits are in [docs/SANDBOX.md](docs/SANDBOX.md#approval-modes).
 
 ## Research
 
@@ -217,6 +242,16 @@ eira memory --forget old-note --workspace /path/to/project
 
 State is workspace-local in `.eira/state.db`. The database stores user messages, assistant messages, tool arguments/results, and execution events. It is permission-restricted but **not encrypted or tamper-proof**. Known environment secrets are redacted on a best-effort basis; arbitrary secrets embedded in project files may not be recognized. Do not commit `.eira/` or share unreviewed traces.
 
+Before each batch of file edits or shell commands, Eira snapshots the workspace into `.eira/history`, so changes made by shell commands are covered too. It never runs git or touches `.git`. Rewind the code, the conversation, or both to any turn:
+
+```bash
+eira checkpoints --workspace /path/to/project          # turns and steps, with file counts
+eira diff --stat --workspace /path/to/project          # what changed since the first checkpoint
+eira rewind turn:2 --both --workspace /path/to/project # shows a summary, then asks to confirm
+```
+
+In chat, use `/checkpoints`, `/diff`, and `/rewind N`. A conversation rewind only hides later messages from the model, and the original prompt comes back in input history. Every code rewind first takes a backup checkpoint, so it can itself be undone. `--no-checkpoints` turns snapshots off. See [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md).
+
 A per-session process lock prevents concurrent writers. Each assistant message is journaled before its tool calls run. On resume, any call without a recorded result is marked `outcome_unknown` and is not replayed. Inspect the filesystem or external state before retrying such an action. Resuming a session uses the current CLI permissions and model settings, not saved authority from the old conversation.
 
 ## Automation and limits
@@ -228,7 +263,21 @@ eira run 'Inspect the tests and summarize coverage gaps.' --read-only --json \
 
 JSONL events go to stdout; interactive approval prompts go to stderr. Exit codes are `0` for completion, `2` for an error, `3` for a runtime budget stop, and `130` for interruption. Agent completion means the model ended its turn; it is not an independent correctness guarantee. Tool failures remain visible in the trace even if the model ends normally.
 
-`--max-tokens` sums provider-reported usage across requests in the current run. It is checked between requests, can overshoot by one response, and cannot enforce usage when a provider omits it. It is **not a billing cap**; use provider-side spend limits for that. Context is bounded in characters and includes tool schemas. At the limit, Eira stops and preserves history instead of silently dropping evidence. Start a new session with reviewed notes for longer work.
+Long tool output keeps its first and last lines with a marker in between, so failures at the bottom stay visible. Shell results report `exit_code`, `output`, `truncated`, `stopped`, `total_bytes`, `total_lines` and `output_id`. A command is stopped once it prints more than 4 MiB. When output is shortened, the full redacted text is saved under `.eira/outputs` for 7 days (at most 64 MiB per session), and the model pages or searches it with the `read_output` tool instead of rerunning the command.
+
+`--max-tokens` sums provider-reported usage across requests in the current run, including cached prompt tokens. It is checked between requests, can overshoot by one response, and cannot enforce usage when a provider omits it. It is **not a billing cap**; use provider-side spend limits for that. Context is bounded in characters and includes tool schemas.
+
+At 80% of `--max-context-chars`, Eira asks the model to summarize the conversation and continues from that summary, the latest workspace guidance and memory, and the user's latest request, quoted in full. The summary is labelled as a record of earlier work rather than new instructions. Nothing is deleted: earlier messages stay in `.eira/state.db` and in `eira trace`, and the `context_compacted` event records what was summarized. A summary can omit details, so for work that must not lose evidence use `--no-compact`, which stops at the limit with history preserved.
+
+The system prompt, `EIRA.md`, and memory are captured when a session starts. If they change later, the next task in that session appends a labelled update instead of rewriting earlier context, which keeps prompt caches valid. A consequence is that a forgotten memory or removed guidance text stays in that session's frozen prompt; start a new session to drop it. `--model-timeout` (default 600 seconds) bounds each model request, including retries. For the Anthropic profile, `--max-output-tokens` (default 16,000) sets the per-response limit and `--no-prompt-cache` turns off cache markers. Requests are not streamed yet, so a very large output limit on a slow model can run into the timeout.
+
+## Measure it
+
+```bash
+eira eval --provider anthropic --model "$MODEL" --output report.json
+```
+
+`eira eval` runs a task suite against your model, each task in a throwaway workspace where only file writes are preapproved, and scores it with declarative checks on files and the final answer. The built-in starter suite covers bug fixing, adding code, a multi-file rename, answering from code, creating a file, finding a line in a large file, and honestly reporting a protected file it cannot edit. Write your own suites for decisions that matter; see [the evaluation guide](docs/EVALS.md).
 
 ## Develop and verify
 
@@ -237,11 +286,17 @@ python3 -m unittest discover -s tests -v
 python3 -m compileall -q eira_harness
 ```
 
-The tests cover financial accounting, lagged signals, risk stops, permissions, path/credential protections, stale edits, recovery, memory, locks, budgets, CLI reports, and HTTP request/response behavior against a local test server. They need localhost socket access. Docker execution and real model quality need environment-specific validation.
+The tests cover financial accounting, lagged signals, risk stops, permissions, path/credential protections, exact and stale edits, paged reads, recovery, memory, locks, budgets, compaction, prefix stability, Anthropic thinking and caching, evaluation scoring, CLI reports, and HTTP request/response behavior against a local test server. They need localhost socket access. Real model quality needs your own `eira eval` runs.
+
+Docker shell tests run when you name a pre-pulled image:
+
+```bash
+EIRA_DOCKER_IMAGE=python:3.11-slim python3 -m unittest tests.test_docker_integration -v
+```
 
 Read [the architecture and extension guide](docs/ARCHITECTURE.md) and [security boundaries](docs/SECURITY.md) before adding powerful tools.
 
-See [the v0.3 terminal changes](docs/RELEASE-0.3.md) and [the v0.2 changes](docs/RELEASE-0.2.md) for the audit remediation summary.
+See [the v0.5 changes](docs/RELEASE-0.5.md), [the v0.4 changes](docs/RELEASE-0.4.md), [the v0.3 terminal changes](docs/RELEASE-0.3.md), and [the v0.2 changes](docs/RELEASE-0.2.md) for the audit remediation summary.
 
 ## License
 

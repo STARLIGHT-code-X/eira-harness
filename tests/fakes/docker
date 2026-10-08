@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Offline stand-in for the docker CLI, for tests only.
+
+`run` finds the --mount whose destination is /workspace, the image and the
+trailing `-c CMD`, then executes /bin/sh -c CMD ON THE HOST with its working
+directory set to the bind source and a minimal environment. stdout and stderr
+pass straight through and the exit code is the command's. `rm -f NAME` and
+`image inspect IMAGE` exit 0. Anything else exits 125.
+
+It does not emulate other mounts or tmpfs, networking, users, capabilities,
+read-only roots or resource limits, so tests must only run commands whose
+outcome does not depend on isolation. Each invocation's arguments (without the
+program path) are appended as one JSON line to $EIRA_FAKE_DOCKER_LOG when set.
+"""
+import json
+import os
+import sys
+
+
+def fail(message):
+    print(f"fake docker: {message}", file=sys.stderr)
+    sys.exit(125)
+
+
+def mount_source(args):
+    specs = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--mount"]
+    specs += [arg.removeprefix("--mount=") for arg in args if arg.startswith("--mount=")]
+    for spec in specs:
+        fields = dict(part.split("=", 1) for part in spec.split(",") if "=" in part)
+        target = fields.get("dst") or fields.get("destination") or fields.get("target")
+        source = fields.get("src") or fields.get("source")
+        if target == "/workspace" and source:
+            return source
+    return None
+
+
+def main(args):
+    log = os.environ.get("EIRA_FAKE_DOCKER_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(args) + "\n")
+    if (args[:2] == ["rm", "-f"] and len(args) == 3) or args[:2] == ["image", "inspect"]:
+        return 0
+    if not args or args[0] != "run":
+        fail(f"unsupported command: {' '.join(args[:2])}")
+    if len(args) < 4 or args[-2] != "-c":
+        fail("run needs a trailing IMAGE -c CMD")
+    source = mount_source(args[1:-3])
+    if not source or not os.path.isdir(source):
+        fail("run needs --mount type=bind,src=DIR,dst=/workspace")
+    os.chdir(source)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "TERM": "dumb"}
+    # exec keeps the caller's process group and exit status semantics intact.
+    os.execve("/bin/sh", ["/bin/sh", "-c", args[-1]], env)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

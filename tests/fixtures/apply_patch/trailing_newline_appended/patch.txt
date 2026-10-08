@@ -1,0 +1,7 @@
+*** Begin Patch
+*** Update File: tail.txt
+@@
+-last line without newline
++last line
++one more
+*** End Patch

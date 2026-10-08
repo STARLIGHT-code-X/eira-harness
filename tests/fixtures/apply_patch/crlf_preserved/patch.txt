@@ -1,0 +1,9 @@
+*** Begin Patch
+*** Update File: windows.txt
+@@
+ first
+-second
++SECOND
++inserted
+ third
+*** End Patch

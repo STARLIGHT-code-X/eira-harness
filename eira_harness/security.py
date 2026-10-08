@@ -99,6 +99,23 @@ class Redactor:
         return text
 
 
+def redact_tree(value, redact, depth=0):
+    """Redact every string in a JSON-like value before it is encoded.
+
+    Redacting encoded text misses secrets whose quotes or backslashes were
+    escaped, so callers redact first and encode afterwards.
+    """
+    if depth > 64:
+        raise HarnessError("Data exceeds the nesting limit.")
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [redact_tree(item, redact, depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {redact(str(key)): redact_tree(item, redact, depth + 1) for key, item in value.items()}
+    return value
+
+
 class Workspace:
     BLOCKED = {
         ".eira", ".git", ".hg", ".svn", ".bzr", ".ssh", ".aws", ".gnupg",
@@ -113,7 +130,8 @@ class Workspace:
         if not self.root.is_dir():
             raise HarnessError("Workspace must be a directory.")
 
-    def path(self, relative: str) -> Path:
+    def path(self, relative: str, protected: list[Path] | None = None) -> Path:
+        """Validate a workspace-relative path; protected is a protected_locations() snapshot."""
         if (not isinstance(relative, str) or not relative or len(relative) > 4096
                 or any(ord(c) < 32 or ord(c) == 127 for c in relative) or Path(relative).is_absolute()):
             raise HarnessError("Use a nonempty workspace-relative path.")
@@ -121,10 +139,7 @@ class Workspace:
         if ".." in raw.parts:
             raise HarnessError("Parent traversal is blocked.")
         for part in raw.parts:
-            lower = part.lower()
-            if (lower in self.BLOCKED or lower == ".env" or lower.startswith(".env.")
-                    or lower.endswith((".pem", ".key", ".p12", ".pfx"))
-                    or lower in {"id_rsa", "id_ed25519", "credentials", "credentials.json"}):
+            if protected_kind(part) is not None:
                 raise HarnessError("Access to state, VCS metadata, or credential files is blocked.")
         candidate = self.root / raw
         current = self.root
@@ -135,21 +150,27 @@ class Workspace:
         resolved = candidate.resolve()
         if not resolved.is_relative_to(self.root):
             raise HarnessError("Path is outside the workspace.")
-        # Protect credentials even when the workspace is a config directory or
-        # a user-selected ancestor of HOME / a custom XDG directory.
+        for location in self.protected_locations() if protected is None else protected:
+            if resolved == location or resolved.is_relative_to(location):
+                raise HarnessError("Access to a protected user configuration path is blocked.")
+        if resolved.exists() and resolved.is_file() and resolved.stat().st_nlink > 1:
+            raise HarnessError("Hard-linked files are blocked.")
+        return resolved
+
+    def protected_locations(self) -> list[Path]:
+        """Resolved user configuration locations that file tools never reach.
+
+        Protects credentials even when the workspace is a config directory or a
+        user-selected ancestor of HOME / a custom XDG directory. A bounded walk
+        takes one snapshot instead of recomputing it for every entry.
+        """
         sensitive = [Path.home() / name for name in self.BLOCKED if name.startswith(".")]
         for variable in ("XDG_CONFIG_HOME", "CLOUDSDK_CONFIG", "GH_CONFIG_DIR", "AWS_SHARED_CREDENTIALS_FILE",
                          "GOOGLE_APPLICATION_CREDENTIALS", "KUBECONFIG"):
             value = os.environ.get(variable)
             if value:
                 sensitive.extend(Path(item).expanduser() for item in value.split(os.pathsep) if item)
-        for location in sensitive:
-            location = location.resolve()
-            if resolved == location or resolved.is_relative_to(location):
-                raise HarnessError("Access to a protected user configuration path is blocked.")
-        if resolved.exists() and resolved.is_file() and resolved.stat().st_nlink > 1:
-            raise HarnessError("Hard-linked files are blocked.")
-        return resolved
+        return [location.resolve() for location in sensitive]
 
     def read(self, relative: str, limit: int = 100_000) -> str:
         path = self.path(relative)
@@ -164,6 +185,29 @@ class Workspace:
         if b"\x00" in data:
             raise HarnessError("Binary files are not supported.")
         return data.decode("utf-8")
+
+
+STATE_NAMES = frozenset({".eira", ".codex"})
+VCS_NAMES = frozenset({".git", ".hg", ".svn", ".bzr"})
+SECRET_NAMES = frozenset({"id_rsa", "id_ed25519", "credentials", "credentials.json"})
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+
+
+def protected_kind(part: str) -> str | None:
+    """Classify one path component, case-insensitively, for file tools and the shell sandbox.
+
+    'state' and 'vcs' names are blocked for file tools; 'secret' names are
+    blocked for file tools and also masked inside shell containers.
+    """
+    lower = part.lower()
+    if lower in STATE_NAMES:
+        return "state"
+    if lower in VCS_NAMES:
+        return "vcs"
+    if (lower in Workspace.BLOCKED or lower == ".env" or lower.startswith(".env.")
+            or lower.endswith(SECRET_SUFFIXES) or lower in SECRET_NAMES):
+        return "secret"
+    return None
 
 
 def atomic_write(path: Path, content: str, overwrite: bool = True) -> None:

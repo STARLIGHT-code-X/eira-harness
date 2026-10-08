@@ -31,6 +31,25 @@ to `tool_use` blocks and tool results to `tool_result` blocks. OpenRouter,
 Gemini, and Ollama use their documented OpenAI-compatible Chat Completions
 endpoints.
 
+Current Claude models think by default and return `thinking` blocks, whose
+text is empty unless the request asks for a summary. Eira stores them with the turn and sends them back unchanged and in
+their original positions. If secret redaction would change any block of a
+turn, Eira stores that turn without its blocks and sends no reasoning up to
+it, which the API accepts, instead of a modified block, which it rejects. Requests carry two `cache_control` breakpoints: one
+on the system prompt, which also covers the tool definitions, and one on the
+newest turn. Because Eira keeps each session's prefix append-only, every
+request can read the previous one from the cache. `usage` cache counters are
+preserved and included in `total_tokens`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--max-output-tokens` | 16000 | Anthropic `max_tokens`; thinking counts toward it. Lower it for older models with smaller limits. |
+| `--model-timeout` | 600 | Seconds per model request including retries, for every profile (max 900) |
+| `--no-prompt-cache` | off | Send no `cache_control` markers |
+
+Eira does not send a `thinking` parameter, so each model uses its own default.
+Server tools, streaming, and beta features are not enabled.
+
 Use a custom endpoint explicitly:
 
 ```sh
@@ -46,6 +65,6 @@ model servers such as Ollama. Endpoint URLs cannot contain credentials, query
 strings, fragments, or control characters. Provider responses are size and
 shape checked before any returned tool call can reach the runtime.
 
-Profiles are tested against local and mocked protocol fixtures. Real account access, model quality, multimodal features, and every model's tool compatibility are not certified by these tests. Extended thinking/server tools are not enabled by the native Anthropic adapter.
+Profiles are tested against local and mocked protocol fixtures. Real account access, model quality, multimodal features, and every model's tool compatibility are not certified by these tests. Thinking blocks are supported as described above; server tools are not enabled.
 
 Official references: [Anthropic tool results](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls), [Gemini OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai), [OpenRouter quickstart](https://openrouter.ai/docs/quickstart), and [Ollama compatibility](https://docs.ollama.com/api/openai-compatibility).

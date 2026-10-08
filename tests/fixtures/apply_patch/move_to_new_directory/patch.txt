@@ -1,0 +1,7 @@
+*** Begin Patch
+*** Update File: src/old_name.py
+*** Move to: lib/pkg/new_name.py
+@@
+-VALUE = 1
++VALUE = 2
+*** End Patch

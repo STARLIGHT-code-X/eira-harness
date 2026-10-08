@@ -41,3 +41,18 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           "$RUNNER_TEMP/eira-venv/bin/eira" demo --workspace "$RUNNER_TEMP/eira-ci-demo" --json
+
+  docker-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Pull the shell image
+        run: docker pull python:3.11-slim
+      - name: Exercise Docker shell mode against a real daemon
+        env:
+          EIRA_DOCKER_IMAGE: python:3.11-slim
+          EIRA_REQUIRE_DOCKER: '1'
+        run: python -m unittest tests.test_docker_integration tests.test_evals_v2 -v
