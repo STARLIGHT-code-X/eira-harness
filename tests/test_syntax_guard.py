@@ -20,6 +20,22 @@ try:
 except ImportError:  # run as tests.test_syntax_guard from the repository root
     from tests.fakes import fake_docker
 
+
+def parser_verdict(name, content):
+    """What this interpreter's own parser does with deeply nested input: newer ones parse it."""
+    import ast
+    try:
+        if name.endswith(".py"):
+            ast.parse(content)
+        elif name.endswith(".json"):
+            json.loads(content)
+        else:
+            tomllib.loads(content)
+    except (RecursionError, MemoryError):
+        return "not checked"
+    return "ok"
+
+
 INVOICE = (
     "import math\n"
     "\n"
@@ -177,11 +193,12 @@ class PythonGuardTests(GuardTestCase):
                               ("deep.json", "[" * 100_000 + "]" * 100_000), ("deep.toml", "a = " + "[" * 100_000 + "]" * 100_000 + "\n")):
             with self.subTest(name=name):
                 result = self.write(name, content)
-                self.assertEqual(result["checks"][0]["result"], "not checked")
+                self.assertEqual(result["checks"][0]["result"], parser_verdict(name, content))
                 self.assertEqual((self.root / name).read_text(), content)
         self.put("grow.py", "x = 1\n")
-        result = self.edit("grow.py", "x = 1", "x = a" + ".b" * 40_000)  # new_string is capped at 100,000 chars
-        self.assertEqual(result["checks"][0]["result"], "not checked")
+        grown = "x = a" + ".b" * 40_000  # new_string is capped at 100,000 chars
+        result = self.edit("grow.py", "x = 1", grown)
+        self.assertEqual(result["checks"][0]["result"], parser_verdict("grow.py", grown + "\n"))
         self.assertEqual(self.events, [])
 
     def test_oversized_text_is_not_checked(self):
@@ -202,8 +219,13 @@ class DataFormatGuardTests(GuardTestCase):
             self.edit("package.json", '"1.0.0"', '"1.0.0",')
         message = str(caught.exception)
         self.assertIn("Syntax check failed for package.json (JSON, Python", message)
-        self.assertIn("(line 4, column 1)", message)
-        self.assertIn("    4█}", message)
+        # Python 3.13+ points at the comma itself; earlier versions point at the closing brace.
+        if sys.version_info >= (3, 13):
+            self.assertIn("(line 3, column 21)", message)
+            self.assertIn('    3█  "version": "1.0.0",', message)
+        else:
+            self.assertIn("(line 4, column 1)", message)
+            self.assertIn("    4█}", message)
         self.assertEqual(target.read_text(), original)
         self.assertEqual(self.asked, [])
         self.assertEqual(self.events[0][1]["language"], "json")
