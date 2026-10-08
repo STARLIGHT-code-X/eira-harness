@@ -15,6 +15,7 @@ Eira 0.4 is an early local developer tool. It has received an internal code revi
 - JSON parsing and stored data have depth bounds. Provider messages and usage are validated before use. Runtime limits bound steps, tool calls, context, and reported token usage; the latter is not a strict billing cap.
 - `--read-only` denies file/memory edits and shell execution. Session journaling still writes. It does not mean offline: model requests and separately granted research/data requests remain possible.
 - Interrupted tools are recorded as having unknown outcomes and are never replayed automatically.
+- Long shell, fetch and tool outputs are shortened to their head and tail. The complete text is saved as a best-effort redacted copy under `.eira/outputs/<session>/` (directories 0700 and never symlinks, files 0600), which file tools block and the shell container hides behind its tmpfs. Copies expire after 7 days and are capped at 64 MiB per session and 4 MiB each. `read_output` accepts only a strict `o-` plus 12 hex digit id resolved in the current session, so it cannot traverse paths or read another session's outputs, and its pages are bounded, fitted and redacted like any tool result.
 
 ## Limits that remain
 

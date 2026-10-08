@@ -161,6 +161,10 @@ class Terminal:
                 self._write(self._paint(self.palette.green, "  ✓ tool completed"))
             else:
                 self.error(event.get("error", "Tool failed"))
+        elif kind == "output_saved":
+            lines = event.get("lines")
+            count = f" ({lines:,} line{'s' if lines != 1 else ''})" if type(lines) is int and lines >= 0 else ""
+            self._write(self._paint(self.palette.muted, f"  · long output saved{count}"))
         elif kind == "assistant":
             self._write(self._safe(event.get("text", "")), end="\n")
         elif kind == "recovered_tool":

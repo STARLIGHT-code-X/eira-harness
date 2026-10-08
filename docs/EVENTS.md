@@ -25,3 +25,9 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 | `reasoning_withheld` | `reason` (`"redaction"`) | Redaction would have changed signed provider blocks, so the turn was journaled without them |
 | `plan` | `plan` (str) | Journal only, never emitted: the `set_plan` tool recorded the plan |
 | `error` | `error` (str, redacted) | CLI only, never journaled and without `session`: with `--json`, the command ended with an error and exits 2 (a failed run prints `run_failed` first) |
+
+## Output truncation and spill
+
+| Event | Fields | When |
+|---|---|---|
+| `output_saved` | `output_id` (str), `tool` (`"shell"` or `"fetch_url"`), `bytes` (int), `lines` (int) | A long tool output was shortened and its full redacted copy saved for `read_output` |
