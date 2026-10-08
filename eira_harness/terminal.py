@@ -163,6 +163,10 @@ class Terminal:
                 self.error(event.get("error", "Tool failed"))
         elif kind == "assistant":
             self._write(self._safe(event.get("text", "")), end="\n")
+        elif kind == "sandbox_protected_path_created":
+            paths = event.get("paths") if isinstance(event.get("paths"), list) else []
+            self.notice("Warning: the shell command created or replaced protected config paths: "
+                        f"{', '.join(str(path) for path in paths)}. Review them before trusting them.")
         elif kind == "recovered_tool":
             self.notice("Recovered an interrupted tool call; its outcome is unknown. It was not replayed.")
         elif kind == "run_stopped":

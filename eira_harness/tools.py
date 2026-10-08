@@ -20,6 +20,7 @@ from typing import Callable
 import uuid
 
 from .finance import backtest
+from . import sandbox
 from .network import fetch_public, validate_url
 from .security import HarnessError, Workspace, atomic_write
 from .store import Store
@@ -271,7 +272,7 @@ class Toolbox:
         self.workspace, self.store, self.policy, self.session = workspace, store, policy, session
         self.registry: dict[str, Tool] = {}
         self.on_event = lambda kind, payload: None
-        self.review_paths = lambda path: False
+        self.review_paths = sandbox.requires_review
         self.write_guards = []
         self.after_call = []
         self.shell_alerts = []
@@ -596,10 +597,16 @@ class Toolbox:
         plan = self._shell_plan(command, timeout)
         self._shell_approve(command, timeout, plan)
         raw = self._shell_run(command, timeout, plan)
-        return self._shell_result(raw)
+        result = self._shell_result(raw)
+        result.update(raw.get("sandbox") or {})
+        return result
 
     def _shell_plan(self, command, timeout) -> dict:
-        return {"detail": f"Mode: docker\nDirectory: {self.workspace.root}\nTimeout: {timeout}s\nCommand:\n{command}"}
+        # Scan before approval, so every scan failure refuses the command before anyone is asked.
+        built = sandbox.build(self.workspace.root, self.store.redact)
+        detail = f"Mode: docker\nDirectory: {self.workspace.root}\nTimeout: {timeout}s\nCommand:\n{command}"
+        return {"detail": detail + "\n" + built["summary"], "protected": True, "mounts": built["mounts"],
+                "scan": built["scan"], "sandbox": built}
 
     def _shell_approve(self, command, timeout, plan):
         self.policy.require("shell", plan["detail"])
@@ -610,18 +617,23 @@ class Toolbox:
             raise HarnessError("Docker is required for shell execution. Install it and pre-pull the configured image.")
         if "," in str(self.workspace.root):
             raise HarnessError("Docker workspace paths cannot contain commas.")
+        root = self.workspace.root
+        # Rebuild after the approval wait: the approved protections must still describe the workspace.
+        built = sandbox.build(root, self.store.redact)
+        approved = plan.get("sandbox")
+        if not approved or sandbox.signature(built) != sandbox.signature(approved):
+            raise HarnessError("Protected paths in the workspace changed during approval; command cancelled. "
+                               "Run it again to review the new sandbox plan.")
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "TERM": "dumb"}
         container = "eira-" + uuid.uuid4().hex[:12]
-        argv = [docker, "run", "--pull=never", "--name", container,
-                "--log-driver=none", "--network=none", "--read-only", "--cap-drop=ALL",
-                "--security-opt=no-new-privileges", "--pids-limit=128", "--memory=512m", "--cpus=1",
-                "--user", f"{os.getuid()}:{os.getgid()}",
-                "--mount", f"type=bind,src={self.workspace.root},dst=/workspace",
-                "--tmpfs", "/workspace/.eira:rw,size=1m,mode=0700",
-                "--tmpfs", "/tmp:rw,size=64m,mode=1777", "--workdir", "/workspace",
-                "--entrypoint", "/bin/sh", self.policy.docker_image, "-c", command]
+        argv = sandbox.docker_argv(docker, container, self.policy.docker_image, root,
+                                   os.getuid(), os.getgid(), command, built)
         try:
-            return _run_capture(argv, self.workspace.root, env, timeout)
+            sandbox.prepare(root, container, built)
+            self.notify("sandbox_prepared", container=container, masked=built["masked"],
+                        read_only=built["read_only"], sanitized_git_config=len(built["git_configs"]),
+                        entries_scanned=built["scan"].entries, seconds=built["scan"].seconds)
+            raw = _run_capture(argv, root, env, timeout)
         finally:
             try:
                 cleanup = subprocess.run([docker, "rm", "-f", container], stdout=subprocess.DEVNULL,
@@ -630,6 +642,22 @@ class Toolbox:
                     raise HarnessError(f"Container cleanup was not verified: {container}.")
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise HarnessError(f"Container cleanup failed; inspect Docker container {container}.") from exc
+            finally:
+                sandbox.cleanup(root, container)
+        try:
+            created = sandbox.created_paths(root, built["scan"])
+        except HarnessError:
+            raw["sandbox"] = {"warning": "Eira could not check whether the command created protected config "
+                                         "paths. Review VCS, agent, IDE and CI config before trusting it."}
+            return raw
+        if created:
+            raw["sandbox"] = {"protected_paths_created": created,
+                              "warning": "The command created or replaced protected config paths: "
+                                         f"{', '.join(created)}. Host tools and later agent sessions may run "
+                                         "or trust them; review them before continuing."}
+            self.shell_alerts.extend(created)
+            self.notify("sandbox_protected_path_created", paths=created)
+        return raw
 
     def _shell_result(self, raw) -> dict:
         return _prefix_result(raw)

@@ -138,10 +138,7 @@ class Workspace:
         if ".." in raw.parts:
             raise HarnessError("Parent traversal is blocked.")
         for part in raw.parts:
-            lower = part.lower()
-            if (lower in self.BLOCKED or lower == ".env" or lower.startswith(".env.")
-                    or lower.endswith((".pem", ".key", ".p12", ".pfx"))
-                    or lower in {"id_rsa", "id_ed25519", "credentials", "credentials.json"}):
+            if protected_kind(part) is not None:
                 raise HarnessError("Access to state, VCS metadata, or credential files is blocked.")
         candidate = self.root / raw
         current = self.root
@@ -181,6 +178,29 @@ class Workspace:
         if b"\x00" in data:
             raise HarnessError("Binary files are not supported.")
         return data.decode("utf-8")
+
+
+STATE_NAMES = frozenset({".eira", ".codex"})
+VCS_NAMES = frozenset({".git", ".hg", ".svn", ".bzr"})
+SECRET_NAMES = frozenset({"id_rsa", "id_ed25519", "credentials", "credentials.json"})
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+
+
+def protected_kind(part: str) -> str | None:
+    """Classify one path component, case-insensitively, for file tools and the shell sandbox.
+
+    'state' and 'vcs' names are blocked for file tools; 'secret' names are
+    blocked for file tools and also masked inside shell containers.
+    """
+    lower = part.lower()
+    if lower in STATE_NAMES:
+        return "state"
+    if lower in VCS_NAMES:
+        return "vcs"
+    if (lower in Workspace.BLOCKED or lower == ".env" or lower.startswith(".env.")
+            or lower.endswith(SECRET_SUFFIXES) or lower in SECRET_NAMES):
+        return "secret"
+    return None
 
 
 def atomic_write(path: Path, content: str, overwrite: bool = True) -> None:

@@ -86,6 +86,9 @@ def renderer(as_json: bool):
             print_safe(f"  → {event['name']}{detail}", file=sys.stderr)
         elif kind == "tool_completed" and not event["ok"]:
             print_safe(f"  ! {event['error']}", file=sys.stderr)
+        elif kind == "sandbox_protected_path_created":
+            print_safe(f"  ! shell command created or replaced protected config paths: {', '.join(event['paths'])}. "
+                       "Review them before trusting them.", file=sys.stderr)
         elif kind == "compaction_started":
             print_safe("  · compacting context…", file=sys.stderr)
         elif kind == "context_compacted":

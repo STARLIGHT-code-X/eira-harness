@@ -285,7 +285,9 @@ class FakeDockerShellTests(SeamTestCase):
         self.assertEqual(result, {"exit_code": 0, "output": "hi", "truncated": False, "stopped": None})
         self.assertEqual((self.root / "out.txt").read_text(), "made")
         self.assertEqual(self.asked, [("shell", f"Mode: docker\nDirectory: {self.root.resolve()}\nTimeout: 30s\n"
-                                                "Command:\nprintf hi && printf made > out.txt")])
+                                                "Command:\nprintf hi && printf made > out.txt\n"
+                                                "Sandbox: no network, read-only system, 0 secret paths hidden, "
+                                                "0 config paths read-only")])
         run, cleanup = self.calls()
         self.assertEqual(run[0], "run")
         self.assertIn("--network=none", run)
