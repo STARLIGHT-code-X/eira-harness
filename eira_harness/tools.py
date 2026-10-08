@@ -23,6 +23,7 @@ from .finance import backtest
 from .network import fetch_public, validate_url
 from .security import HarnessError, Workspace, atomic_write
 from .store import Store
+from . import syntax
 
 READ_PAGE_LINES = 2_000
 READ_PAGE_CHARS = 24_000
@@ -209,6 +210,8 @@ class Policy:
     shell_mode: str = "disabled"
     docker_image: str = "python:3.11-slim"
     read_only: bool = False
+    syntax_guard: str = "reject"
+    lint_commands: tuple = ()
 
     def require(self, name: str, detail: str, workspace_write: bool = False, always_ask: bool = False):
         if self.read_only and (workspace_write or name == "shell"):
@@ -274,6 +277,8 @@ class Toolbox:
         self.review_paths = lambda path: False
         self.write_guards = []
         self.after_call = []
+        self.write_guards.append(lambda path, old, new: syntax.guard(path, old, new, self.policy.syntax_guard, self.notify))
+        self.after_call.append(syntax.lint_hook(self))
         self.shell_alerts = []
         glob = string("Optional filter. Without '/', matches file names at any depth (*.py); with '/', '*' stays in one "
                       "directory and '**' spans directories (src/**/*.py)", maxLength=200)

@@ -25,3 +25,11 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 | `reasoning_withheld` | `reason` (`"redaction"`) | Redaction would have changed signed provider blocks, so the turn was journaled without them |
 | `plan` | `plan` (str) | Journal only, never emitted: the `set_plan` tool recorded the plan |
 | `error` | `error` (str, redacted) | CLI only, never journaled and without `session`: with `--json`, the command ended with an error and exits 2 (a failed run prints `run_failed` first) |
+
+## Edit checks
+
+See [CHECKS.md](CHECKS.md).
+
+| Event | Fields | When |
+|---|---|---|
+| `syntax_check_failed` | `path` (str), `language` (`"python"`, `"json"` or `"toml"`), `line` (int, 1-based), `rejected` (bool, `true`) | The syntax guard refused an edit that would have made a parseable file unparseable; nothing was written or asked |

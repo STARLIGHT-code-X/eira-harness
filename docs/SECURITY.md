@@ -15,6 +15,7 @@ Eira 0.4 is an early local developer tool. It has received an internal code revi
 - JSON parsing and stored data have depth bounds. Provider messages and usage are validated before use. Runtime limits bound steps, tool calls, context, and reported token usage; the latter is not a strict billing cap.
 - `--read-only` denies file/memory edits and shell execution. Session journaling still writes. It does not mean offline: model requests and separately granted research/data requests remain possible.
 - Interrupted tools are recorded as having unknown outcomes and are never replayed automatically.
+- The edit syntax guard only parses Python, JSON and TOML with stdlib parsers on the host and never executes file content; XML is excluded because entity-expansion safety depends on the linked expat. It runs before approval and can only refuse a write. `--lint-cmd` commands run only through the Docker shell tool, with its sandbox, approval policy, credential rejection and output limits, never on the host. See [CHECKS.md](CHECKS.md).
 
 ## Limits that remain
 
