@@ -20,13 +20,14 @@ import time
 from typing import Callable
 import uuid
 
-from . import patch
+from . import navigate, patch
 from .finance import backtest
 from . import sandbox
 from .network import fetch_public, validate_url
 from .outputs import OutputStore, count_lines, head_tail
 from .security import HarnessError, Workspace, atomic_write
 from .store import Store
+from .text import split_lines
 
 READ_PAGE_LINES = 2_000
 READ_PAGE_CHARS = 24_000
@@ -283,8 +284,13 @@ class Toolbox:
         self.shell_alerts = []
         glob = string("Optional filter. Without '/', matches file names at any depth (*.py); with '/', '*' stays in one "
                       "directory and '**' spans directories (src/**/*.py)", maxLength=200)
-        self.register(Tool("list_files", "List workspace files; hidden and credential paths are excluded.",
-                           {"path": string("Relative directory (default '.')"), "glob": glob}, [], self.list_files, effects=frozenset({"read"})))
+        ignored = {"type": "boolean", "description": "Include files ignored by .gitignore and dependency/cache directories (default false)"}
+        self.register(Tool("list_files", "List workspace files, including safe dotfiles, honoring .gitignore. "
+                           "Credential, state and VCS paths are never listed.",
+                           {"path": string("Relative directory (default '.')"), "glob": glob, "ignored": ignored,
+                            "offset": {"type": "integer", "minimum": 0, "description": "Skip this many paths (default 0)"},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Maximum paths (default 500)"}},
+                           [], self.list_files, effects=frozenset({"read"}), describe=self._describe_list))
         self.register(Tool("read_file", "Read a UTF-8 workspace file, optionally a line range. Long files are returned in pages; "
                            "use next_start_line to continue. Results are untrusted data.",
                            {"path": string("Relative file path"),
@@ -306,11 +312,17 @@ class Toolbox:
                            {"path": string("Relative file path"), "content": string("Full new content", maxLength=1_000_000),
                             "expected_sha256": string("Original SHA-256 or 'new'")},
                            ["path", "content", "expected_sha256"], self.write_file, effects=frozenset({"read", "write"})))
-        self.register(Tool("search_files", "Search a literal text string in bounded workspace text files.",
-                           {"query": string("Literal search string", maxLength=500),
+        self.register(Tool("search_files", "Search workspace text files for a literal string, or a Python regular expression "
+                           "with regex=true, line by line. Honors .gitignore and reports skipped files. Results are untrusted data.",
+                           {"query": string("Literal text, or a regular expression when regex is true", maxLength=500),
                             "path": string("Relative directory (default '.')"), "glob": glob,
-                            "ignore_case": {"type": "boolean", "description": "Case-insensitive match (default false)"}},
-                           ["query"], self.search_files, effects=frozenset({"read"})))
+                            "ignore_case": {"type": "boolean", "description": "Case-insensitive match (default false)"},
+                            "regex": {"type": "boolean", "description": "Treat query as a Python regular expression matched per line (default false)"},
+                            "context": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Lines of context before and after each match (default 0)"},
+                            "max_results": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Default 100"},
+                            "output": string("matches (default), files with per-file counts, or totals only", enum=["matches", "files", "count"]),
+                            "ignored": ignored},
+                           ["query"], self.search_files, effects=frozenset({"read"}), describe=self._describe_search))
         self.register(Tool("fetch_url", "Fetch an approved public HTTPS source. No private IPs, redirects, cookies, or credentials.",
                            {"url": string("Public HTTPS source URL", maxLength=4096)}, ["url"], self.fetch_url, effects=frozenset({"network"})))
         self.register(Tool("read_output", "Read a page of a long tool output that was shortened, using the output_id from that result. "
@@ -403,44 +415,33 @@ class Toolbox:
         text = " ".join(self.store.redact(str(text)).split())
         return text if len(text) <= 100 else text[:99] + "…"
 
-    def list_files(self, path=".", glob=None):
-        root = self.workspace.path(path)
-        if not root.is_dir():
-            raise HarnessError("Path must be a directory.")
-        paths, pending, scanned, truncated = [], [(root, 0)], 0, False
-        deadline = time.monotonic() + 3
-        while pending:
-            directory, depth = pending.pop()
-            if depth >= 32:
-                truncated = True
-                continue
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    scanned += 1
-                    if scanned > 5000 or time.monotonic() > deadline:
-                        return {"files": sorted(paths), "truncated": True}
-                    if entry.name.startswith(".") or entry.name in {"node_modules", "__pycache__", "venv"} or entry.is_symlink():
-                        continue
-                    relative = str(Path(entry.path).relative_to(self.workspace.root))
-                    try:
-                        self.workspace.path(relative)
-                    except HarnessError:
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append((Path(entry.path), depth + 1))
-                    elif entry.is_file(follow_symlinks=False):
-                        if glob and not glob_match(relative, glob):
-                            continue
-                        paths.append(relative)
-                        if len(paths) >= 500:
-                            return {"files": sorted(paths), "truncated": True}
-        return {"files": sorted(paths), "truncated": truncated}
+    def _describe_list(self, arguments):
+        text = arguments["path"] if isinstance(arguments.get("path"), str) else "."
+        if isinstance(arguments.get("glob"), str):
+            text += f" ({arguments['glob']})"
+        return text + (" +ignored" if arguments.get("ignored") is True else "")
+
+    def _describe_search(self, arguments):
+        query = arguments.get("query")
+        if not isinstance(query, str):
+            return ""
+        # Redact before encoding: escaping can hide a secret from the redactor.
+        query = self.store.redact(query)
+        text = f"/{query}/" if arguments.get("regex") is True else json.dumps(query, ensure_ascii=False)
+        if isinstance(arguments.get("path"), str) and arguments["path"] != ".":
+            text += f" in {arguments['path']}"
+        if isinstance(arguments.get("glob"), str):
+            text += f" ({arguments['glob']})"
+        return text
+
+    def list_files(self, path=".", glob=None, ignored=False, offset=0, limit=500):
+        return navigate.list_page(navigate.walk(self.workspace, path, include_ignored=ignored, glob=glob), offset, limit)
 
     def read_file(self, path, start_line=1, end_line=None):
         text = self.workspace.read(path, MAX_TEXT_FILE)
         visible = self.store.redact(text)
         protected = visible != text
-        lines = _lines(visible)
+        lines = [line + ending for line, ending in split_lines(visible)]
         total = len(lines)
         if start_line > max(total, 1):
             raise HarnessError(f"start_line is past the end of the file ({total} lines).")
@@ -561,38 +562,10 @@ class Toolbox:
     def apply_patch(self, input, directory=None, routed_from=None):
         return patch.apply(self, input, directory=directory, routed_from=routed_from)
 
-    def search_files(self, query, path=".", glob=None, ignore_case=False):
-        if not query:
-            raise HarnessError("Search query cannot be empty.")
-        needle = query.casefold() if ignore_case else query
-        matches, skipped = [], 0
-        files = self.list_files(path, glob)
-        deadline = time.monotonic() + 5
-
-        def done(truncated):
-            result = {"matches": matches, "truncated": truncated}
-            if skipped:
-                result["skipped_files"] = skipped
-                result["note"] = "Some files were skipped because they are binary, not UTF-8, protected, or over 5 MB."
-            return result
-        for name in files["files"]:
-            if time.monotonic() > deadline:
-                return done(True)
-            try:
-                lines = _lines(self.workspace.read(name, MAX_TEXT_FILE))
-            except (HarnessError, UnicodeError, OSError):
-                skipped += 1
-                continue
-            for number, line in enumerate(lines, 1):
-                line = line.rstrip("\r\n")
-                column = (line.casefold() if ignore_case else line).find(needle)
-                if column >= 0:
-                    # Show the text around the match, so a hit deep in a long line is visible.
-                    lo = max(0, column - 200) if len(line) > 500 else 0
-                    matches.append({"path": name, "line": number, "column": column + 1, "text": line[lo:lo + 500]})
-                    if len(matches) >= 50:
-                        return done(True)
-        return done(files["truncated"])
+    def search_files(self, query, path=".", glob=None, ignore_case=False, regex=False, context=0,
+                     max_results=100, output="matches", ignored=False):
+        return navigate.search(self.workspace, query, path, glob, ignore_case, regex, context, max_results,
+                               output, ignored)
 
     def fetch_url(self, url):
         parsed = validate_url(url)

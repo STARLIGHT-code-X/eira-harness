@@ -5,6 +5,7 @@ Eira 0.4 is an early local developer tool. It has received an internal code revi
 ## Enforced controls
 
 - File tools reject traversal, symlinks, hard links, protected configuration paths, common credential files, and Eira/VCS state. Standard home configuration directories and configured credential paths are protected even when selected through an ancestor workspace.
+- Listing and search show safe dotfiles but every entry still passes the same path checks, so blocked paths stay invisible with or without `ignored`; `.gitignore` can only hide files. Regex search runs in a separate `python -I` interpreter (cwd `/`, empty environment, fixed script inside the installed package) that receives only validated paths and is killed after 10 s, so a catastrophic pattern cannot hang Eira. The worker reads by absolute path with the same check-then-read race as in-process reads, opening without following a final symlink and rechecking for a regular, singly linked file.
 - Reads and directory scans have byte, entry, depth, and time limits. These are application checks, not a hardened filesystem sandbox against concurrent object replacement.
 - Approval material uses JSON-escaped lines so invisible characters remain visible. Shell and financial-source approvals are separate from file-write grants.
 - Files containing recognized secret values are marked uneditable by model tools. Full-file writes containing redaction placeholders or recognized credentials are rejected. Optimistic hashes are rechecked after approval; creation fails atomically if another file already exists.
