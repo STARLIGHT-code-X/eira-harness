@@ -130,7 +130,8 @@ class Workspace:
         if not self.root.is_dir():
             raise HarnessError("Workspace must be a directory.")
 
-    def path(self, relative: str) -> Path:
+    def path(self, relative: str, protected: list[Path] | None = None) -> Path:
+        """Validate a workspace-relative path; protected is a protected_locations() snapshot."""
         if (not isinstance(relative, str) or not relative or len(relative) > 4096
                 or any(ord(c) < 32 or ord(c) == 127 for c in relative) or Path(relative).is_absolute()):
             raise HarnessError("Use a nonempty workspace-relative path.")
@@ -152,21 +153,27 @@ class Workspace:
         resolved = candidate.resolve()
         if not resolved.is_relative_to(self.root):
             raise HarnessError("Path is outside the workspace.")
-        # Protect credentials even when the workspace is a config directory or
-        # a user-selected ancestor of HOME / a custom XDG directory.
+        for location in self.protected_locations() if protected is None else protected:
+            if resolved == location or resolved.is_relative_to(location):
+                raise HarnessError("Access to a protected user configuration path is blocked.")
+        if resolved.exists() and resolved.is_file() and resolved.stat().st_nlink > 1:
+            raise HarnessError("Hard-linked files are blocked.")
+        return resolved
+
+    def protected_locations(self) -> list[Path]:
+        """Resolved user configuration locations that file tools never reach.
+
+        Protects credentials even when the workspace is a config directory or a
+        user-selected ancestor of HOME / a custom XDG directory. A bounded walk
+        takes one snapshot instead of recomputing it for every entry.
+        """
         sensitive = [Path.home() / name for name in self.BLOCKED if name.startswith(".")]
         for variable in ("XDG_CONFIG_HOME", "CLOUDSDK_CONFIG", "GH_CONFIG_DIR", "AWS_SHARED_CREDENTIALS_FILE",
                          "GOOGLE_APPLICATION_CREDENTIALS", "KUBECONFIG"):
             value = os.environ.get(variable)
             if value:
                 sensitive.extend(Path(item).expanduser() for item in value.split(os.pathsep) if item)
-        for location in sensitive:
-            location = location.resolve()
-            if resolved == location or resolved.is_relative_to(location):
-                raise HarnessError("Access to a protected user configuration path is blocked.")
-        if resolved.exists() and resolved.is_file() and resolved.stat().st_nlink > 1:
-            raise HarnessError("Hard-linked files are blocked.")
-        return resolved
+        return [location.resolve() for location in sensitive]
 
     def read(self, relative: str, limit: int = 100_000) -> str:
         path = self.path(relative)

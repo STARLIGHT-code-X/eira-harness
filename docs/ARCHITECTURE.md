@@ -29,6 +29,8 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | `provider.py` | HTTP transport, Chat Completions and Anthropic Messages translation, prompt caching |
 | `tools.py` | Tool definitions, argument validation, workspace operations, execution policy |
 | `text.py` | Shared line splitting: only `\r\n`, `\r` and `\n` end a line, as in the file tools |
+| `navigate.py` | Bounded workspace walk with `.gitignore` support, list paging, literal and regex line search |
+| `search_worker.py` | Standalone stdlib script that runs regex search in an isolated, killable interpreter |
 | `security.py` | Path checks, atomic file writes, best-effort secret redaction, terminal sanitization |
 | `network.py` | Bounded HTTP transport, total deadlines, address pinning, and text retrieval |
 | `market_data.py` | Fixed-source daily price retrieval and CSV normalization |
@@ -81,6 +83,12 @@ New side-effecting tools must call `toolbox.policy.require(...)` before executio
 - `Toolbox.shell` runs as phases, `_shell_plan`, `_shell_approve`, `_shell_run` and `_shell_result`, after the mode, credential and read-only checks.
 
 Metadata and hooks never bypass `Policy.require`. Effects are advisory, `always_ask` can add a prompt but never remove one, read-only is evaluated first, and every default is a no-op.
+
+## Code navigation
+
+`list_files` and `search_files` share `navigate.walk`: `os.scandir` without following symlinks, sorted, at most 32 levels, 200,000 entries and 5 s. Every entry passes `Workspace.path` (with one snapshot of the protected home-configuration locations per walk), so blocked names never appear whatever the flags. Dot entries such as `.github` and `.gitignore` are listed; dependency and cache directories (`node_modules`, `__pycache__`, `venv`, `.venv`, `.tox`, `.nox`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`) and `.gitignore` matches are skipped unless `ignored` is true. Results carry `skipped` counts (`ignored`, `heavy_dirs`, `blocked`, and for search `binary`, `too_large`, `non_utf8`, `unreadable`) instead of skipping silently. `list_files` pages with `offset`, `limit` (default 500, at most 2,000) and `next_offset`, in sorted path order.
+
+Literal search runs in-process with a 5 s deadline. A regular expression never runs in Eira's process, because Python's `re` has no timeout: the pattern is compiled in the parent first (invalid patterns fail without a subprocess), then `search_worker.py` runs as `python -I` with cwd `/`, an empty environment and only parent-validated absolute paths on stdin, and its process group is killed after 10 s. Both modes share `search_worker.scan`, number lines with the `text.split_lines` rule used by `read_file` and `apply_patch`, and report `matches` (optional `context` lines), `files` (per-file counts) or `count` totals. Details are in [CODE-SEARCH.md](CODE-SEARCH.md).
 
 ## Session prefix and compaction
 
