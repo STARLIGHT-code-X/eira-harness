@@ -757,10 +757,10 @@ def _prefix_result(raw: dict) -> dict:
             "truncated": raw["total"] > 20_000, "stopped": raw["stopped"]}
 
 
-def _run_capture(argv, cwd, env, timeout, capture_limit=SHELL_CAPTURE_BYTES):
+def _run_capture(argv, cwd, env, timeout, capture_limit=SHELL_CAPTURE_BYTES, merge_stderr=True):
     """Capture a finite prefix through a pipe; never spool arbitrary output to disk."""
-    process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if merge_stderr else subprocess.DEVNULL, start_new_session=True)
     captured, total, reason = bytearray(), 0, None
     deadline = time.monotonic() + timeout
     try:

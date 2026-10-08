@@ -6,7 +6,7 @@ The initial goal is an inspectable, provider-configurable local harness that can
 
 Built through 0.5: `eira eval` with a starter suite; summary compaction with a frozen, cache-friendly prefix; `edit_file` and all-or-nothing `apply_patch`; a pre-approval syntax guard; checkpoints and rewind covering shell side effects; a Docker mount plan that masks secrets and makes config read-only; sandboxed autorun; regex code search; head-and-tail output with `read_output`; `AGENTS.md` discovery; Docker integration tests in CI.
 
-1. **Behavioral evals** (specified, not built): `command_succeeds` checks that run the suite's tests in the Docker sandbox, a built-in coding suite of multi-file bug fixes, pass@k with Wilson intervals across `--repeat`, parallel `--jobs`, and `--harness codex` to run the same suite through `codex exec --json` with identical checks. Publish both reports before any comparative claim.
+1. **Measure**: behavioral evals shipped in 0.5 (`command_succeeds`, the `coding` suite, pass@k and Wilson intervals, `--jobs`, `--harness codex`, `--compare`). Next: run them against real models, publish Eira and Codex reports side by side on the same model, and grow the suite with real-bug tasks from open repositories.
 2. **Provider wave**: token streaming for both wire formats, reasoning-effort control, live tool output, mid-turn steering and queued follow-ups.
 3. **Plan and goal modes** with a machine-checkable definition of done built on sandboxed checks; a full JSON Schema subset in the tool registry.
 4. Docker on macOS and rootless, a reproducible development image, and a non-Docker sandbox backend (bubblewrap) that reuses the mount plan.

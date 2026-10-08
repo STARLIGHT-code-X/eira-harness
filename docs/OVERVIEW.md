@@ -42,7 +42,7 @@ you ──► eira (CLI / chat) ──► Agent loop ──► model endpoint (O
 - **Undo.** `eira checkpoints`, `eira diff`, and `eira rewind --code|--conversation|--both` (or `/checkpoints`, `/diff` and `/rewind` in chat).
 - **Budgets.** `--max-steps`, `--max-tool-calls`, `--max-tokens`, `--max-context-chars`, `--max-output-tokens`, `--model-timeout`; `--no-compact` to stop at the context limit instead of summarizing.
 - **Inspection.** `eira sessions`, `eira trace` (the frozen prompt, every message and event), `eira instructions`, `eira doctor`, and JSONL events with `--json` ([EVENTS.md](EVENTS.md)).
-- **Measurement.** `eira eval` runs task suites in throwaway workspaces and reports pass rate, tool errors, tokens and time ([EVALS.md](EVALS.md)).
+- **Measurement.** `eira eval` runs task suites in throwaway workspaces. The `coding` suite runs each task's own tests in the sandbox, and reports include pass@k, 95% intervals and an error taxonomy. `--harness codex` scores Codex CLI on the same tasks with the same checks ([EVALS.md](EVALS.md)).
 
 ## Models
 
@@ -68,4 +68,5 @@ Eira is a developer release, not a hardened multi-tenant service. The SQLite jou
 | `sandbox.py`, `approvals.py` | Container mount plan; sandboxed-autorun decisions |
 | `checkpoints.py`, `instructions.py` | Snapshots and rewind; instruction discovery |
 | `store.py`, `security.py`, `text.py` | Journal, redaction, path checks, line splitting |
-| `evals.py`, `finance.py`, `market_data.py`, `demo.py` | Evaluation, backtesting, price data, offline demo |
+| `evals.py`, `evalstats.py`, `suites.py`, `harnesses.py` | Evaluation runner, statistics, the built-in coding suite, the Codex harness adapter |
+| `finance.py`, `market_data.py`, `demo.py` | Backtesting, price data, offline demo |

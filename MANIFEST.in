@@ -4,4 +4,4 @@ recursive-include examples *.csv *.md
 recursive-include tests *.py
 recursive-include .github *.yml
 recursive-include tests *.json
-include tests/fakes/docker
+include tests/fakes/docker tests/fakes/codex

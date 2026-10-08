@@ -128,7 +128,7 @@ HTTPS is required for remote model endpoints. HTTP is accepted only for loopback
 | Undo | Content-addressed checkpoints before every file-changing batch, including shell commands; `eira rewind` restores code, conversation, or both, without touching `.git` |
 | Instructions | `AGENTS.md`, `EIRA.md`, `CLAUDE.md` and `GEMINI.md` discovered from the global config down to the workspace; subdirectory guidance delivered with the first tool result that touches it |
 | Long sessions | Frozen per-session prefix, append-only history, summary compaction with originals preserved |
-| Evaluation | `eira eval`: task suites in throwaway workspaces with pass rate, tool errors, tokens, and time |
+| Evaluation | `eira eval`: declarative and behavioral (`command_succeeds` in the sandbox) checks, a built-in `coding` suite, pass@k and 95% intervals, parallel `--jobs`, and `--harness codex` with `--compare` to score Codex CLI on the same tasks |
 | Execution | Disabled by default. Docker sandbox with no network, no capabilities, a read-only root, secrets masked and VCS/CI/agent config read-only; per-command approval, or `--shell-approval sandboxed` to run protected commands without prompts (destructive ones still ask). Integration-tested against a real daemon |
 | Output | Head and tail of long output kept, so failures at the end survive; the full redacted output is saved and paged with `read_output` |
 | Financial data | Daily stock CSV from Alpha Vantage; daily crypto CSV from Coinbase |

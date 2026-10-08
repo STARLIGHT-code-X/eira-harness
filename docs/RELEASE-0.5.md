@@ -22,11 +22,18 @@
 
 - **AGENTS.md discovery** ([INSTRUCTIONS.md](INSTRUCTIONS.md)): Eira reads a global file, then one file per directory from the project root down to the workspace. `EIRA.md`, `AGENTS.override.md` and `AGENTS.md` come first, with `CLAUDE.md` and `GEMINI.md` as fallbacks. Instructions are capped at 32 KiB and frozen into the session prefix. Guidance in subdirectories is delivered with the first tool result that touches them. `eira instructions` and `/instructions` show what was loaded.
 
+## Behavioral evals
+
+- `command_succeeds` checks run the task's own tests in the Docker sandbox after the agent finishes. They restore fixture tests first, so tasks can't be passed by editing tests. `agent_shell` tasks give the agent the sandboxed-autorun shell.
+- The built-in `coding` suite has eight tasks; an oracle passes all of them and a do-nothing provider passes only the control task, both offline and against a real daemon in CI.
+- Reports (version 2) add pass@k (Chen et al. 2021), a Wilson 95% interval, an error taxonomy, and per-task aggregates. `--jobs` runs tasks in parallel, with deterministic result order.
+- `--harness codex` runs the same suite through `codex exec` with identical checks, and `--compare` prints deltas, reporting a difference only when the 95% intervals don't overlap ([EVALS.md](EVALS.md)).
+
 ## Integration
 
 The features were built in parallel on shared integration seams ([EVENTS.md](EVENTS.md); "Adding a tool" in [ARCHITECTURE.md](ARCHITECTURE.md)), then merged and tested together. `tests/test_integration_features.py` drives the real CLI against a loopback model. It covers a multi-file patch followed by a broken patch that the syntax guard refuses as a whole, rewinding that work, and a sandboxed `rm` that rewind undoes. It also checks that a shell-routed patch is still denied without write approval, and that subdirectory guidance arrives with a patch result.
 
-Verification: 396 unit tests, plus the Docker integration suite, pass against a real daemon both as root and as a non-root user. CI runs the unit tests on Python 3.11 to 3.14 and the Docker suite on GitHub's runners.
+Verification: 409 unit tests, plus the Docker integration suite, pass against a real daemon both as root and as a non-root user. CI runs the unit tests on Python 3.11 to 3.14, and the Docker suite and coding-suite oracle on GitHub's runners.
 
 ## Upgrade notes
 
@@ -35,4 +42,4 @@ Verification: 396 unit tests, plus the Docker integration suite, pass against a 
 
 ## Not in 0.5
 
-No live model was run for this release, so there are no measured pass rates yet. Run `eira eval` with your model to get them. Behavioral evals (sandboxed test checks, pass@k, side-by-side runs with `codex exec`) were specified but not built; see [ROADMAP.md](ROADMAP.md). Token streaming, MCP, plan and goal modes, and web search remain future work.
+No live model was run for this release, so there are no measured pass rates yet, and no comparison with Codex. Run `eira eval coding` with your model, and with `--harness codex` on the same model, to get them. Token streaming, MCP, plan and goal modes, and web search remain future work.

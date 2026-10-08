@@ -228,7 +228,8 @@ def build_parser():
     bt.add_argument("--output", help="New workspace-relative .json or .md report (never overwrites)")
     evaluate = sub.add_parser("eval", help="Score a model on a task suite in throwaway workspaces")
     workspace(evaluate)
-    evaluate.add_argument("suite", nargs="?", default="starter", help="Workspace-relative suite JSON, or 'starter' (default)")
+    evaluate.add_argument("suite", nargs="?", default="starter",
+                          help="Workspace-relative suite JSON, 'starter' (default), or 'coding' (needs Docker)")
     provider_flags(evaluate)
     limit_flags(evaluate)
     evaluate.add_argument("--repeat", type=int, default=1, help="Run every task this many times (1–20)")
@@ -236,6 +237,12 @@ def build_parser():
     evaluate.add_argument("--output", help="Write the JSON report to a new workspace-relative file")
     evaluate.add_argument("--dump-suite", action="store_true", help="Print the suite as JSON without running it")
     evaluate.add_argument("--json", action="store_true", help="Print only the JSON report")
+    evaluate.add_argument("--jobs", type=int, default=1, help="Run up to this many tasks at once (1–8)")
+    evaluate.add_argument("--docker-image", help="Pre-pulled image for command checks and agent shells (overrides the suite's)")
+    evaluate.add_argument("--harness", choices=["eira", "codex"], default="eira",
+                          help="Run the tasks through Eira or through `codex exec` with the same checks")
+    evaluate.add_argument("--codex-model", help="Model passed to codex exec -m (default: Codex's own)")
+    evaluate.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), help="Compare two reports and exit")
     sub.add_parser("providers", help="List model provider profiles and credential variables")
     prices = sub.add_parser("prices", help="Download daily prices from a fixed financial-data source")
     workspace(prices)
@@ -508,8 +515,13 @@ def chat_checkpoints(command, argument, store, workspace, session, ui):
 
 
 def run_eval(args, workspace):
-    from .evals import load_suite, run_suite
+    from .evals import compare_reports, load_suite, run_suite, suite_image
+    from .security import bounded_json_loads
     from .settings import resolve_settings
+    if args.compare:
+        first, second = (bounded_json_loads(workspace.read(path, 50_000_000)) for path in args.compare)
+        print_safe(compare_reports(first, second))
+        return 0
     suite = load_suite(args.suite, workspace)
     if args.dump_suite:
         print_safe(json.dumps(redact_tree(suite, Redactor()), indent=2, ensure_ascii=False))
@@ -521,12 +533,18 @@ def run_eval(args, workspace):
             raise HarnessError("Choose a new .json report path; existing files are never overwritten.")
         if not target.parent.is_dir() or not os.access(target.parent, os.W_OK):
             raise HarnessError("The report directory must already exist and be writable.")
+    # Fail on configuration before any model call.
+    image = suite_image(suite, args.docker_image)
+    if args.harness == "codex":
+        from .harnesses import codex_binary
+        codex_binary()
     resolve_settings(args)
     limits = limits_from(args)
     if any(isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0
            for value in vars(limits).values()):
         raise HarnessError("All runtime limits must be positive.")
-    build_provider(args.provider, args.model, args.base_url, **provider_options(args))
+    if args.harness == "eira":
+        build_provider(args.provider, args.model, args.base_url, **provider_options(args))
     work_dir = args.work_dir
     if work_dir is not None and not work_dir.is_absolute():
         work_dir = workspace.root / work_dir
@@ -541,11 +559,13 @@ def run_eval(args, workspace):
                    f"{compact_count(result['tokens'])} tokens, {result['seconds']:.1f}s){reason}", file=sys.stderr)
 
     if not args.json:
-        print_safe(f"Eira eval · suite {suite['name']} · {args.provider} / {args.model} · "
-                   f"{len(suite['tasks'])} tasks × {args.repeat}", file=sys.stderr)
+        who = f"codex / {args.codex_model or 'default model'}" if args.harness == "codex" else f"{args.provider} / {args.model}"
+        print_safe(f"Eira eval · suite {suite['name']} · {who} · {len(suite['tasks'])} tasks × {args.repeat}"
+                   + (f" · {args.jobs} jobs" if args.jobs > 1 else ""), file=sys.stderr)
     report = run_suite(suite, lambda: build_provider(args.provider, args.model, args.base_url, **provider_options(args)),
-                       limits, repeat=args.repeat, work_dir=work_dir, progress=progress)
-    report["provider"] = args.provider
+                       limits, repeat=args.repeat, work_dir=work_dir, progress=progress, jobs=args.jobs,
+                       image=image, harness=args.harness, codex_model=args.codex_model)
+    report["provider"] = args.provider if args.harness == "eira" else "codex"
     encoded = json.dumps(redact_tree(report, Redactor()), indent=2, ensure_ascii=False, allow_nan=False)
     if target:
         try:
@@ -560,7 +580,8 @@ def run_eval(args, workspace):
     if args.json:
         print_safe(encoded)
     else:
-        print_safe(f"\nPassed {summary['passed']}/{summary['runs']} ({summary['pass_rate']:.0%}) · "
+        low, high = summary["pass_rate_ci95"]
+        print_safe(f"\nPassed {summary['passed']}/{summary['runs']} ({summary['pass_rate']:.0%}, 95% CI {low:.0%}–{high:.0%}) · "
                    f"{summary['tool_errors']} tool errors · {compact_count(summary['tokens'])} tokens · "
                    f"{summary['seconds']:.1f}s" + (f"\nReport: {target}" if target else ""), file=sys.stderr)
     return 0 if summary["passed"] == summary["runs"] else 1

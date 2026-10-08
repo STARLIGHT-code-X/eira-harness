@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Offline stand-in for `codex exec --json`, for tests only.
+
+Writes codex_was_here.txt under the -C directory and prints a recorded JSONL
+stream. FAKE_CODEX_MODE=error prints an error event instead of completing.
+`--version` prints a version line.
+"""
+import json
+import os
+import sys
+
+
+def main(args):
+    if args[:1] == ["--version"]:
+        print("codex-cli 0.0.0-fake")
+        return 0
+    if args[:1] != ["exec"] or "--json" not in args or "-C" not in args:
+        print("fake codex: unsupported arguments", file=sys.stderr)
+        return 2
+    root = args[args.index("-C") + 1]
+    with open(os.path.join(root, "codex_was_here.txt"), "w", encoding="utf-8") as handle:
+        handle.write(args[-1])
+    events = [{"type": "thread.started", "thread_id": "fake"},
+              {"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}},
+              {"type": "item.completed", "item": {"type": "agent_message", "text": "Fake Codex finished the task."}}]
+    if os.environ.get("FAKE_CODEX_MODE") == "error":
+        events.append({"type": "error", "message": "SECRET-ERROR-TEXT must not be copied"})
+    else:
+        events.append({"type": "turn.completed", "usage": {"input_tokens": 30, "output_tokens": 12}})
+    for event in events:
+        print(json.dumps(event))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
