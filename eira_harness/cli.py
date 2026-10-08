@@ -52,9 +52,25 @@ def provider_options(args) -> dict:
 
 
 def limits_from(args) -> Limits:
-    return Limits(max_steps=args.max_steps, max_tool_calls=args.max_tool_calls,
-                  max_context_chars=args.max_context_chars, max_total_tokens=args.max_tokens,
-                  compact=not args.no_compact)
+    return Limits(
+        max_steps=args.max_steps,
+        max_tool_calls=args.max_tool_calls,
+        max_context_chars=args.max_context_chars,
+        max_total_tokens=args.max_tokens,
+        compact=not args.no_compact,
+    )
+
+
+def policy_from(args) -> Policy:
+    return Policy(
+        approve=approve,
+        approve_writes=args.approve_writes,
+        read_only=args.read_only,
+        allowed_hosts={h.lower() for h in args.allow_host},
+        shell_mode=args.shell,
+        docker_image=args.docker_image,
+        allowed_data_sources=set(args.allow_data_source),
+    )
 
 
 def renderer(as_json: bool):
@@ -235,9 +251,7 @@ def run_agent(args, store, workspace):
         ui = Terminal()
     session = args.session or store.create(args.prompt if not interactive else 'Interactive session')
     store.require(session)
-    policy = Policy(approve=approve, approve_writes=args.approve_writes, read_only=args.read_only,
-                    allowed_hosts={h.lower() for h in args.allow_host}, shell_mode=args.shell,
-                    docker_image=args.docker_image, allowed_data_sources=set(args.allow_data_source))
+    policy = policy_from(args)
     limits = limits_from(args)
     provider = None
 
@@ -353,7 +367,8 @@ def run_eval(args, workspace):
             raise HarnessError("The report directory must already exist and be writable.")
     resolve_settings(args)
     limits = limits_from(args)
-    if any(value <= 0 for key, value in vars(limits).items() if key != "compact"):
+    if any(isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0
+           for value in vars(limits).values()):
         raise HarnessError("All runtime limits must be positive.")
     build_provider(args.provider, args.model, args.base_url, **provider_options(args))
     work_dir = args.work_dir

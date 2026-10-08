@@ -28,6 +28,7 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | `agent.py` | Bounded loop, frozen session prefix, compaction, budget checks, crash recovery |
 | `provider.py` | HTTP transport, Chat Completions and Anthropic Messages translation, prompt caching |
 | `tools.py` | Tool definitions, argument validation, workspace operations, execution policy |
+| `text.py` | Shared line splitting: only `\r\n`, `\r` and `\n` end a line, as in the file tools |
 | `security.py` | Path checks, atomic file writes, best-effort secret redaction, terminal sanitization |
 | `network.py` | Bounded HTTP transport, total deadlines, address pinning, and text retrieval |
 | `market_data.py` | Fixed-source daily price retrieval and CSV normalization |
@@ -65,6 +66,21 @@ toolbox.register(Tool(
 Current schemas support scalar string, integer, number, and boolean properties, required fields, enum values, simple bounds, and rejection of undeclared properties. The validator is deliberately not advertised as a full JSON Schema implementation.
 
 New side-effecting tools must call `toolbox.policy.require(...)` before execution. `Toolbox.register` does not infer a custom tool's privileges; plugin authors are trusted application developers, not untrusted model output. Use `Workspace` for file boundaries. Never pass arbitrary tool names or arguments directly to a shell or import statement. Add behavioral tests for denials, malformed input, and interrupted execution.
+
+`Tool` takes two optional fields that never reach the model; `Tool.schema()` is unchanged by them:
+
+- `effects`: a set drawn from `read`, `write`, `exec`, `network` and `memory` (default empty). `register` rejects any other name. `Toolbox.mutating(name)` is true when a tool's effects include `write` or `exec`, which features such as checkpoints use to decide what to snapshot.
+- `describe(arguments) -> str`: the one-line progress summary shown in `tool_started`. Its result is redacted, whitespace-collapsed and cut to 100 characters; an exception renders an empty summary.
+
+`Toolbox` also exposes seams that features attach to instead of editing tool bodies:
+
+- `write_guards`: callables `guard(path, old, new)`, with `old` None for a new file. `edit_file` and `write_file` run them through `check_write` after computing the new content and before approval. A guard refuses the write by raising `HarnessError`, which leaves the file untouched and asks nothing; a returned dict is reported in the result's `checks` list.
+- `review_paths(path) -> bool`: true forces a human prompt for that write even under `--approve-writes`, through `Policy.require(..., always_ask=True)`.
+- `after_call`: hooks `hook(name, arguments, result) -> result`, run in order after a tool returns.
+- `notify(kind, **fields)`: raise an event that the owning `Agent` redacts, journals and emits (see [EVENTS.md](EVENTS.md)).
+- `Toolbox.shell` runs as phases, `_shell_plan`, `_shell_approve`, `_shell_run` and `_shell_result`, after the mode, credential and read-only checks.
+
+Metadata and hooks never bypass `Policy.require`. Effects are advisory, `always_ask` can add a prompt but never remove one, read-only is evaluated first, and every default is a no-op.
 
 ## Session prefix and compaction
 

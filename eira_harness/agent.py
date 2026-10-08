@@ -88,8 +88,10 @@ class Agent:
                  emit: Callable[[dict], None] = lambda event: None, limits: Limits | None = None):
         self.provider, self.store, self.toolbox = provider, store, toolbox
         self.emit = emit
+        toolbox.on_event = lambda kind, payload: self.event(kind, **payload)
         self.limits = limits or Limits()
-        if any(value <= 0 for key, value in vars(self.limits).items() if key != "compact"):
+        if any(isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0
+               for value in vars(self.limits).values()):
             raise HarnessError("All runtime limits must be positive.")
 
     def event(self, kind, **payload):
