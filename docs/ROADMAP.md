@@ -2,12 +2,14 @@
 
 The initial goal is an inspectable, provider-configurable local harness that can do real filesystem work and numerical strategy testing. Shipping more tool names is not evidence of better task performance.
 
-## Next: prove coding and research quality
+## Next: prove coding quality
 
-1. Done in 0.4: `eira eval` with a starter suite. Next, publish suites for repository bug fixes, data investigations, cited research, and strategy revisions, and record results per model with `--repeat` variance.
-2. Done in 0.4: summary compaction with originals preserved and a frozen, cache-friendly session prefix. Next: streaming, and Docker-executed behavioral checks for evals.
-3. Done in 0.4: exact-match `edit_file` with reviewed diffs. Next: multi-hunk patches and rollback artifacts.
-4. Done in 0.4: Docker integration tests on Linux, in CI. Next: macOS, rootless Docker, and a reproducible development image.
+Built through 0.5: `eira eval` with a starter suite; summary compaction with a frozen, cache-friendly prefix; `edit_file` and all-or-nothing `apply_patch`; a pre-approval syntax guard; checkpoints and rewind covering shell side effects; a Docker mount plan that masks secrets and makes config read-only; sandboxed autorun; regex code search; head-and-tail output with `read_output`; `AGENTS.md` discovery; Docker integration tests in CI.
+
+1. **Behavioral evals** (specified, not built): `command_succeeds` checks that run the suite's tests in the Docker sandbox, a built-in coding suite of multi-file bug fixes, pass@k with Wilson intervals across `--repeat`, parallel `--jobs`, and `--harness codex` to run the same suite through `codex exec --json` with identical checks. Publish both reports before any comparative claim.
+2. **Provider wave**: token streaming for both wire formats, reasoning-effort control, live tool output, mid-turn steering and queued follow-ups.
+3. **Plan and goal modes** with a machine-checkable definition of done built on sandboxed checks; a full JSON Schema subset in the tool registry.
+4. Docker on macOS and rootless, a reproducible development image, and a non-Docker sandbox backend (bubblewrap) that reuses the mount plan.
 
 ## Then: integrate external tools
 
@@ -21,7 +23,7 @@ The initial goal is an inspectable, provider-configurable local harness that can
 1. Extend the v0.2 Alpha Vantage and Coinbase daily-price connectors with adjusted data and validation for splits, dividends, missing observations, and exchange calendars.
 2. More deterministic strategy families, parameter sweeps, walk-forward splits, turnover and exposure reporting, and out-of-sample evaluation.
 3. A persistent forward paper-trading service with event timestamps, replayable fills, and failure recovery.
-4. Only after validation: separately reviewed live execution adapters with broker-side limits and explicit authorization. This is not part of v0.4.
+4. Only after validation: separately reviewed live execution adapters with broker-side limits and explicit authorization. This is not part of v0.5.
 
 ## Operations
 

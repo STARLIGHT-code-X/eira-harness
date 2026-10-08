@@ -4,7 +4,7 @@
 
 Eira gives a tool-capable language model a working directory, an execution loop, durable sessions, reviewed file edits, and financial research tools. You choose the model and endpoint. Conversations and tool traces stay in a local SQLite database; relevant conversation content is sent to the model endpoint you configure.
 
-This is a working **v0.4 developer release**, inspired by the general-agent and financial-workflow scope of Minara Harness. It is independently implemented. It does not claim Minara feature parity or benchmark superiority.
+This is a working **v0.5 developer release**, inspired by the general-agent and financial-workflow scope of Minara Harness. It is independently implemented. It does not claim Minara feature parity or benchmark superiority.
 
 ```text
 EIRA / offline-scripted-demo
@@ -18,6 +18,8 @@ maximum drawdown 5.93%; 4 round trips after fees and slippage.
 ```
 
 The example above is a deterministic demo on synthetic prices, not evidence of investment performance or an LLM evaluation.
+
+New to Eira? [docs/OVERVIEW.md](docs/OVERVIEW.md) is a one-page outline of what it is, how it works, and where it stops.
 
 ## Install with curl
 
@@ -51,6 +53,7 @@ The terminal has a frost-and-lavender welcome panel, workspace and permission co
 | `/sessions` / `/resume ID` | Find and resume workspace conversations |
 | `/status` | Show the current endpoint and permissions |
 | `/instructions` | List the instruction files loaded for this workspace |
+| `/checkpoints` / `/diff` / `/rewind` | List workspace checkpoints, show changes, and restore code or conversation |
 | `/clear` | Clear the display while retaining history |
 | `/exit` | Leave chat |
 
@@ -121,10 +124,13 @@ HTTPS is required for remote model endpoints. HTTP is accepted only for loopback
 |---|---|
 | Agent execution | Sequential tool loop, schema validation, bounded steps/calls/context/reported tokens |
 | Models | OpenAI, Anthropic (thinking blocks, prompt caching), OpenRouter, Gemini, Ollama, and custom endpoints |
-| Coding | Exact-match `edit_file`, paged reads of large files, glob (`**`, rooted `./`) and case-insensitive search with match columns, reviewed create/replace with fast, readable diffs and stale-content checks |
+| Coding | `apply_patch` (Codex patch format, multi-file, all-or-nothing with rollback), exact-match `edit_file`, paged reads, regex search in a killable worker with context lines and `.gitignore`, a pre-approval syntax guard for Python/JSON/TOML, and optional sandboxed lint feedback |
+| Undo | Content-addressed checkpoints before every file-changing batch, including shell commands; `eira rewind` restores code, conversation, or both, without touching `.git` |
+| Instructions | `AGENTS.md`, `EIRA.md`, `CLAUDE.md` and `GEMINI.md` discovered from the global config down to the workspace; subdirectory guidance delivered with the first tool result that touches it |
 | Long sessions | Frozen per-session prefix, append-only history, summary compaction with originals preserved |
 | Evaluation | `eira eval`: task suites in throwaway workspaces with pass rate, tool errors, tokens, and time |
-| Execution | Disabled by default; per-command approval in Docker, integration-tested against a real daemon |
+| Execution | Disabled by default. Docker sandbox with no network, no capabilities, a read-only root, secrets masked and VCS/CI/agent config read-only; per-command approval, or `--shell-approval sandboxed` to run protected commands without prompts (destructive ones still ask). Integration-tested against a real daemon |
+| Output | Head and tail of long output kept, so failures at the end survive; the full redacted output is saved and paged with `read_output` |
 | Financial data | Daily stock CSV from Alpha Vantage; daily crypto CSV from Coinbase |
 | Research | Approved public HTTPS URL fetching, textual extraction, source URLs |
 | Strategy testing | Long/cash SMA crossover on daily CSV bars, costs, exposure limit, drawdown stop |
@@ -133,7 +139,7 @@ HTTPS is required for remote model endpoints. HTTP is accepted only for loopback
 | Recovery | Interrupted tool outcomes marked unknown; no automatic side-effect replay |
 | Extensibility | Python provider interface and validated tool registry |
 
-**Not implemented:** autonomous web search, browser/desktop control, MCP transport, scheduled jobs, multi-agent delegation, streaming market feeds, forward paper trading, brokerage/wallet execution, or production-grade security isolation. The roadmap is in [docs/ROADMAP.md](docs/ROADMAP.md).
+**Not implemented:** token streaming, autonomous web search, browser/desktop control, MCP transport, scheduled jobs, multi-agent delegation, streaming market feeds, forward paper trading, brokerage/wallet execution, or production-grade security isolation. The roadmap is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Coding and approvals
 
@@ -290,7 +296,7 @@ EIRA_DOCKER_IMAGE=python:3.11-slim python3 -m unittest tests.test_docker_integra
 
 Read [the architecture and extension guide](docs/ARCHITECTURE.md) and [security boundaries](docs/SECURITY.md) before adding powerful tools.
 
-See [the v0.4 changes](docs/RELEASE-0.4.md), [the v0.3 terminal changes](docs/RELEASE-0.3.md), and [the v0.2 changes](docs/RELEASE-0.2.md) for the audit remediation summary.
+See [the v0.5 changes](docs/RELEASE-0.5.md), [the v0.4 changes](docs/RELEASE-0.4.md), [the v0.3 terminal changes](docs/RELEASE-0.3.md), and [the v0.2 changes](docs/RELEASE-0.2.md) for the audit remediation summary.
 
 ## License
 
