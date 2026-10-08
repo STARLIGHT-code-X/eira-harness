@@ -111,6 +111,8 @@ class WriteSeamTests(SeamTestCase):
         super().setUp()
         self.target = self.root / "app.py"
         self.target.write_bytes(b"x = 1\r\n")
+        # Exercise the guard list itself, without the built-in syntax guard (tests/test_syntax_guard.py).
+        self.tools.write_guards.clear()
 
     def digest(self, path):
         return self.tools.read_file(path)["sha256"]

@@ -15,6 +15,7 @@ from .finance import backtest, markdown_report
 from .provider import DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MODEL_TIMEOUT, MAX_MODEL_TIMEOUT, build_provider
 from .security import HarnessError, Redactor, Workspace, atomic_write, clean_terminal, approval_text, redact_tree
 from .store import Store
+from .syntax import parse_lint
 from .tools import Policy, Toolbox
 
 
@@ -70,6 +71,8 @@ def policy_from(args) -> Policy:
         shell_mode=args.shell,
         docker_image=args.docker_image,
         allowed_data_sources=set(args.allow_data_source),
+        syntax_guard=args.syntax_guard,
+        lint_commands=parse_lint(args.lint_cmd),
     )
 
 
@@ -139,6 +142,10 @@ def build_parser():
         command.add_argument("--allow-host", action="append", default=[], help="Preapprove HTTPS GET requests to this exact hostname (repeatable)")
         command.add_argument("--shell", choices=["disabled", "docker"], default="disabled")
         command.add_argument("--docker-image", default="python:3.11-slim", help="Pre-pulled Docker image for shell mode")
+        command.add_argument("--syntax-guard", choices=["reject", "warn", "off"], default="reject",
+                             help="Reject edits that break Python, JSON or TOML syntax (default), only warn, or skip checks")
+        command.add_argument("--lint-cmd", action="append", default=[], metavar="GLOB=COMMAND",
+                             help="After a write, run COMMAND in the Docker sandbox for matching files; {path} is the file (repeatable)")
         limit_flags(command)
         command.add_argument("--json", action="store_true", help="Emit JSONL events to stdout")
 

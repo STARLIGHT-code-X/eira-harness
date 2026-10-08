@@ -473,7 +473,7 @@ class GuardTests(PatchTestCase):
             if path == "b.py":
                 raise HarnessError("syntax error in b.py")
             return {"type": "probe", "path": path}
-        self.tools.write_guards.append(guard)
+        self.tools.write_guards[:] = [guard]  # isolate from the built-in syntax guard
         self.fails(wrap("*** Update File: a.py\n@@\n-a = 1\n+a = 2\n*** Update File: b.py\n@@\n-b = 1\n+b = (\n"), "syntax error in b.py")
         self.assertEqual(seen, ["a.py", "b.py"])
         self.assertEqual(self.asked, [])

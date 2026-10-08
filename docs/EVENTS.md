@@ -45,3 +45,11 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 | Event | Fields | When |
 |---|---|---|
 | `output_saved` | `output_id` (str), `tool` (`"shell"` or `"fetch_url"`), `bytes` (int), `lines` (int) | A long tool output was shortened and its full redacted copy saved for `read_output` |
+
+## Edit checks
+
+See [CHECKS.md](CHECKS.md).
+
+| Event | Fields | When |
+|---|---|---|
+| `syntax_check_failed` | `path` (str), `language` (`"python"`, `"json"` or `"toml"`), `line` (int, 1-based), `rejected` (bool, `true`) | The syntax guard refused an edit that would have made a parseable file unparseable; nothing was written or asked |
