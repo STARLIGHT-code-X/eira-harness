@@ -30,6 +30,7 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | `tools.py` | Tool definitions, argument validation, workspace operations, execution policy |
 | `patch.py` | `apply_patch`: Codex-format parser, tolerant matching, one combined approval, all-or-nothing commit with rollback ([PATCHES.md](PATCHES.md)) |
 | `outputs.py` | Head-and-tail shortening of long output; saved, redacted copies paged by `read_output` |
+| `instructions.py` | Instruction-file discovery (EIRA.md, AGENTS.md, fallbacks), the prompt budget, and just-in-time subdirectory guidance |
 | `text.py` | Shared line splitting: only `\r\n`, `\r` and `\n` end a line, as in the file tools |
 | `navigate.py` | Bounded workspace walk with `.gitignore` support, list paging, literal and regex line search |
 | `search_worker.py` | Standalone stdlib script that runs regex search in an isolated, killable interpreter |
@@ -97,6 +98,7 @@ Literal search runs in-process with a 5 s deadline. A regular expression never r
 Providers cache, and newer models bind their reasoning to, the exact request prefix: system prompt, tools, then earlier messages. Eira therefore keeps every request in a session append-only:
 
 - The system prompt, `EIRA.md`, and memory are captured in the `session_context` table on the session's first run. Later changes are detected by digest and appended as a labelled user message on the next task. The original prompt is never rewritten.
+- Instruction files are discovered by `instructions.discover()` (global file, then the git root down to the workspace) and rendered into that frozen prompt. Subdirectory files are attached to tool results by an `after_call` hook (`instructions.attach_jit`), so they never change the prefix. See [INSTRUCTIONS.md](INSTRUCTIONS.md).
 - Tools are registered in a fixed order. Recovery closes interrupted calls by appending results.
 - Tool results are fitted to `max_tool_output_chars` once, when they are journaled, so replays are identical.
 

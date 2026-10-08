@@ -173,6 +173,8 @@ class Terminal:
                         f"{', '.join(str(path) for path in paths)}. Review them before trusting them.")
         elif kind == "recovered_tool":
             self.notice("Recovered an interrupted tool call; its outcome is unknown. It was not replayed.")
+        elif kind == "guidance_loaded" and event.get("via") == "jit":
+            self._write(self._paint(self.palette.muted, f"  · instructions loaded from {self._safe(event.get('path', ''), 300)}"))
         elif kind == "run_stopped":
             self.notice(f"Stopped: {event.get('reason', 'limit')}. Session saved.")
         elif kind == "run_completed":
@@ -207,6 +209,7 @@ class Terminal:
         self._write("  /sessions          List saved sessions")
         self._write("  /resume ID         Resume a saved session")
         self._write("  /status            Show workspace, model, and permission context")
+        self._write("  /instructions      List instruction files (EIRA.md, AGENTS.md, ...) in load order")
         self._write("  /clear             Clear the visible terminal")
         self._write("  /exit              Leave chat")
 

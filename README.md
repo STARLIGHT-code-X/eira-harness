@@ -50,8 +50,11 @@ The terminal has a frost-and-lavender welcome panel, workspace and permission co
 | `/new` | Start a fresh conversation |
 | `/sessions` / `/resume ID` | Find and resume workspace conversations |
 | `/status` | Show the current endpoint and permissions |
+| `/instructions` | List the instruction files loaded for this workspace |
 | `/clear` | Clear the display while retaining history |
 | `/exit` | Leave chat |
+
+Repositories set up for other agents work out of the box: alongside `EIRA.md`, Eira reads `AGENTS.md` (and `AGENTS.override.md`) as Codex does, falls back to `CLAUDE.md` or `GEMINI.md`, and walks from the git root down to the workspace. Instruction files in subdirectories are delivered the first time the model works there. Run `Eira instructions` to see what is loaded and why; `--instructions workspace` or `none` limits it. See [docs/INSTRUCTIONS.md](docs/INSTRUCTIONS.md).
 
 Ctrl+C during a task interrupts it and returns to the prompt; Ctrl+C at the prompt exits. Existing tool approval rules remain in effect. Switching providers retains the conversation and sends that history to the newly selected endpoint on your next task; use `/new` for a fresh conversation.
 

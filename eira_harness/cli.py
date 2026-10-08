@@ -58,6 +58,7 @@ def limits_from(args) -> Limits:
         max_tool_calls=args.max_tool_calls,
         max_context_chars=args.max_context_chars,
         max_total_tokens=args.max_tokens,
+        instructions=getattr(args, "instructions", None) or ("workspace" if args.command == "eval" else "all"),
         compact=not args.no_compact,
     )
 
@@ -130,6 +131,9 @@ def build_parser():
         command.add_argument("--max-tool-calls", type=int, default=50)
         command.add_argument("--max-tokens", type=int, default=100_000, help="Cumulative reported usage; checked between requests, not a hard billing cap")
         command.add_argument("--max-context-chars", type=int, default=120_000)
+        command.add_argument("--instructions", choices=["all", "workspace", "none"], default=None,
+                             help="Instruction files to load: global, project and workspace (all; default except eval), "
+                                  "workspace only (default for eval), or none")
         command.add_argument("--no-compact", action="store_true", help="Stop at the context limit instead of summarizing older turns")
 
     def model_options(command):
@@ -170,6 +174,10 @@ def build_parser():
     memory = sub.add_parser("memory", help="List or remove workspace memory")
     workspace(memory)
     memory.add_argument("--forget", metavar="KEY")
+    listing = sub.add_parser("instructions", help="List the instruction files (EIRA.md, AGENTS.md, ...) Eira would load")
+    workspace(listing)
+    listing.add_argument("--instructions", choices=["all", "workspace", "none"], default="all")
+    listing.add_argument("--json", action="store_true")
     bt = sub.add_parser("backtest", help="Backtest a daily date,close CSV without a model")
     workspace(bt)
     bt.add_argument("csv", help="Workspace-relative CSV path")
@@ -345,6 +353,9 @@ def run_agent(args, store, workspace):
                     print('\033[2J\033[H', end='', file=sys.stderr, flush=True)
                 banner()
                 ui.notice('Display cleared; conversation history is retained. /new starts a fresh session.')
+            elif command == '/instructions':
+                from . import instructions
+                ui.notice(instructions.report(workspace, limits.instructions))
             elif command.startswith('/'):
                 ui.error('Unknown command. Type /help for available commands.')
             else:
@@ -518,6 +529,9 @@ def main(argv=None):
             if args.forget:
                 store.forget(args.forget)
             print_safe(json.dumps(store.memories(), indent=2))
+        elif args.command == "instructions":
+            from . import instructions
+            print_safe(instructions.report(workspace, args.instructions, as_json=args.json))
         else:
             return run_agent(args, store, workspace)
         return 0

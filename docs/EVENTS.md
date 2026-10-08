@@ -53,3 +53,9 @@ See [CHECKS.md](CHECKS.md).
 | Event | Fields | When |
 |---|---|---|
 | `syntax_check_failed` | `path` (str), `language` (`"python"`, `"json"` or `"toml"`), `line` (int, 1-based), `rejected` (bool, `true`) | The syntax guard refused an edit that would have made a parseable file unparseable; nothing was written or asked |
+
+## Instruction files (agents-md)
+
+| Event | Fields | When |
+|---|---|---|
+| `guidance_loaded` | `path` (str), `sha256` (str, of the file bytes), `bytes` (int, file size), `via` (`"prefix"` or `"jit"`) | `prefix`: once per included file when a session's prefix is first frozen; `path` is relative to the project root, or `~/.config/eira/...` for the global file. `jit`: a subdirectory instruction file was attached to a tool result; `path` is workspace-relative. See [INSTRUCTIONS.md](INSTRUCTIONS.md) |
