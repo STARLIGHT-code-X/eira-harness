@@ -126,6 +126,11 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO session_context VALUES (?,?,?)",
                             (session, self.redact(system), digest))
 
+    def set_session_digest(self, session: str, digest: str):
+        # The frozen prompt itself is never rewritten, even if redaction rules change.
+        with self.db:
+            self.db.execute("UPDATE session_context SET digest=? WHERE session=?", (digest, session))
+
     def event(self, session: str, kind: str, payload: dict):
         with self.db:
             self.db.execute("INSERT INTO events(session,time,kind,payload) VALUES (?,?,?,?)",

@@ -13,7 +13,7 @@ from .security import HarnessError
 
 USER_AGENT = f"eira-harness/{__version__}"
 DEFAULT_MAX_OUTPUT_TOKENS = 16_000
-DEFAULT_MODEL_TIMEOUT = 300
+DEFAULT_MODEL_TIMEOUT = 600
 MAX_MODEL_TIMEOUT = 900
 # Assistant fields understood by OpenAI-compatible servers. Eira keeps provider
 # metadata (such as Anthropic thinking blocks) beside these, never inside them.
@@ -248,12 +248,15 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
     if not isinstance(messages, list):
         raise HarnessError("Messages are malformed.")
     system, converted, pending = [], [], []
+    # Reasoning before a turn whose blocks could not be stored verbatim is
+    # dropped as a leading run, which keeps every later block valid.
+    cutoff = max((i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("reasoning_withheld")), default=-1)
 
     def flush():
         if pending:
             converted.append({"role": "user", "content": list(pending)})
             pending.clear()
-    for message in messages:
+    for index, message in enumerate(messages):
         if not isinstance(message, dict) or not isinstance(message.get("role"), str):
             raise HarnessError("Messages are malformed.")
         role = message["role"]
@@ -279,7 +282,7 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
         calls = message.get("tool_calls") or []
         if not isinstance(calls, list) or len(calls) > 32:
             raise HarnessError("Tool calls are malformed.")
-        replayed = _replayed_content(message, calls)
+        replayed = _replayed_content(message, calls) if index > cutoff else None
         if replayed is not None:
             converted.append({"role": "assistant", "content": replayed})
             continue
@@ -325,9 +328,14 @@ def _normalise_anthropic(data: dict) -> tuple[dict, dict]:
             # but must be replayed verbatim on the next request.
             reasoning = True
     stop = data.get("stop_reason")
-    if stop in {"max_tokens", "refusal", "model_context_window_exceeded"}:
-        raise HarnessError("Model response was truncated or refused; no tools were executed. "
+    if stop == "max_tokens":
+        raise HarnessError("Model reply hit the output limit; no tools were executed. "
                            "Raise --max-output-tokens if the model needs a longer reply.")
+    if stop == "refusal":
+        raise HarnessError("Model declined this request (stop_reason: refusal); no tools were executed.")
+    if stop == "model_context_window_exceeded":
+        raise HarnessError("Request exceeded the model's context window; no tools were executed. "
+                           "Lower --max-context-chars so Eira compacts earlier, or start a new session.")
     if stop is not None and not isinstance(stop, str):
         raise ValueError("stop")
     result = {"role": "assistant", "content": "".join(texts)}
@@ -374,7 +382,7 @@ class Provider:
         self.parsed = _validate_endpoint(base_url)
         if not isinstance(api_key, str) or any(ord(c) < 32 or ord(c) == 127 for c in api_key):
             raise HarnessError("Provider credentials cannot contain control characters.")
-        if type(timeout) not in (int, float) or not 0 < timeout <= MAX_MODEL_TIMEOUT:
+        if type(timeout) not in (int, float) or not 1 <= timeout <= MAX_MODEL_TIMEOUT:
             raise HarnessError(f"Model timeout must be between 1 and {MAX_MODEL_TIMEOUT} seconds.")
         if type(max_output_tokens) is not int or not 256 <= max_output_tokens <= 128_000:
             raise HarnessError("Maximum output tokens must be between 256 and 128,000.")

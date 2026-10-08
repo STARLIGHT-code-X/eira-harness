@@ -123,7 +123,7 @@ class ContextTests(unittest.TestCase):
             self.agent(provider, max_context_chars=base + 4_000, compact=False).run("Read it")
         self.assertEqual(len(provider.seen), 1)
         empty = Scripted(call("read_file", {"path": "big.txt", "start_line": 1}, "c2"), call("read_file", {"path": "big.txt", "start_line": 2}, "c3"), text(""))
-        with self.assertRaisesRegex(HarnessError, "no summary"):
+        with self.assertRaisesRegex(HarnessError, "did not return a summary"):
             self.agent(empty, max_context_chars=base + 30_000).run("Read again")
         self.assertEqual(self.store.messages(self.session)[0]["content"], "Read it")
 

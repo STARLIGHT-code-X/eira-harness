@@ -162,7 +162,7 @@ def build_parser():
     provider_flags(evaluate)
     limit_flags(evaluate)
     evaluate.add_argument("--repeat", type=int, default=1, help="Run every task this many times (1–20)")
-    evaluate.add_argument("--work-dir", type=Path, help="Keep task workspaces under this directory for inspection")
+    evaluate.add_argument("--work-dir", type=Path, help="Keep task workspaces under this directory (relative to --workspace)")
     evaluate.add_argument("--output", help="Write the JSON report to a new workspace-relative file")
     evaluate.add_argument("--dump-suite", action="store_true", help="Print the suite as JSON without running it")
     evaluate.add_argument("--json", action="store_true", help="Print only the JSON report")
@@ -342,16 +342,23 @@ def run_eval(args, workspace):
     from .settings import resolve_settings
     suite = load_suite(args.suite, workspace)
     if args.dump_suite:
-        print(json.dumps(suite, indent=2, ensure_ascii=False))
+        print_safe(json.dumps(suite, indent=2, ensure_ascii=False))
         return 0
     target = None
     if args.output:
         target = workspace.path(args.output)
         if target.suffix != ".json" or target.exists():
             raise HarnessError("Choose a new .json report path; existing files are never overwritten.")
+        if not target.parent.is_dir() or not os.access(target.parent, os.W_OK):
+            raise HarnessError("The report directory must already exist and be writable.")
     resolve_settings(args)
     limits = limits_from(args)
+    if any(value <= 0 for key, value in vars(limits).items() if key != "compact"):
+        raise HarnessError("All runtime limits must be positive.")
     build_provider(args.provider, args.model, args.base_url, **provider_options(args))
+    work_dir = args.work_dir
+    if work_dir is not None and not work_dir.is_absolute():
+        work_dir = workspace.root / work_dir
 
     def progress(result, done, total):
         if args.json:
@@ -366,11 +373,17 @@ def run_eval(args, workspace):
         print_safe(f"Eira eval · suite {suite['name']} · {args.provider} / {args.model} · "
                    f"{len(suite['tasks'])} tasks × {args.repeat}", file=sys.stderr)
     report = run_suite(suite, lambda: build_provider(args.provider, args.model, args.base_url, **provider_options(args)),
-                       limits, repeat=args.repeat, work_dir=args.work_dir, progress=progress)
+                       limits, repeat=args.repeat, work_dir=work_dir, progress=progress)
     report["provider"] = args.provider
-    encoded = json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False)
+    encoded = Redactor()(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
     if target:
-        atomic_write(target, Redactor()(encoded) + "\n", overwrite=False)
+        try:
+            atomic_write(target, encoded + "\n", overwrite=False)
+        except OSError as exc:
+            # Never lose a paid run: fall back to stdout.
+            print_safe(f"Eira: could not write {target}: {exc}. The report follows on stdout.", file=sys.stderr)
+            print_safe(encoded)
+            target = None
     summary = report["summary"]
     if args.json:
         print_safe(encoded)
@@ -484,7 +497,10 @@ def main(argv=None):
         print_safe("Setup closed. Run Eira again when ready.", file=sys.stderr)
         return 0
     except KeyboardInterrupt:
-        print_safe("Interrupted. Any started session was saved; in-flight tool outcomes may be unknown.", file=sys.stderr)
+        if args.command == "eval":
+            print_safe("Interrupted. Throwaway eval workspaces were removed unless --work-dir kept them.", file=sys.stderr)
+        else:
+            print_safe("Interrupted. Any started session was saved; in-flight tool outcomes may be unknown.", file=sys.stderr)
         return 130
     except (HarnessError, OSError, ValueError) as exc:
         if getattr(args, "json", False):

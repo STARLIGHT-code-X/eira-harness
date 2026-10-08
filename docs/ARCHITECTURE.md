@@ -44,7 +44,7 @@ Messages use the Chat Completions conversation format. A tool result has `role: 
 
 Model HTTP errors `429`, `500`, `502`, `503`, `504`, and `529` receive at most two retries within `--model-timeout`. Authentication failures and malformed responses fail immediately. Uncertain connection failures are not retried automatically. HTTP error bodies are not echoed; errors name the status and, when present, a lowercase provider error-type token. Streaming is future work.
 
-An assistant message may carry `anthropic_content`: the provider's original content blocks, kept when the turn includes `thinking` or `redacted_thinking` blocks. The Anthropic transport replays them verbatim and in order when their `tool_use` ids still match the normalized `tool_calls`, and otherwise rebuilds the turn from `content` and `tool_calls`. The Chat Completions transport sends only standard message fields, so local metadata never reaches those servers.
+An assistant message may carry `anthropic_content`: the provider's original content blocks, kept when the turn includes `thinking` or `redacted_thinking` blocks. The Anthropic transport replays them verbatim and in order when their `tool_use` ids still match the normalized `tool_calls`, and otherwise rebuilds the turn from `content` and `tool_calls`. Journal redaction must not alter signed blocks: if redacting a turn would change any block, the turn is stored without them and marked `reasoning_withheld`, and the transport then replays no reasoning up to and including that turn. Removing a leading run of reasoning is accepted by the API; replaying a modified block is not. The Chat Completions transport sends only standard message fields, so local metadata never reaches those servers.
 
 ## Adding a tool
 

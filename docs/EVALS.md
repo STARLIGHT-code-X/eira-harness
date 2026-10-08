@@ -5,7 +5,7 @@
 ```bash
 eira eval                                   # built-in starter suite, configured model
 eira eval --provider anthropic --model "$MODEL" --repeat 3 --output report.json
-eira eval my-suite.json --work-dir ./eval-runs   # keep workspaces for inspection
+eira eval my-suite.json --work-dir eval-runs     # keep workspaces (relative to --workspace)
 eira eval --dump-suite > my-suite.json      # start from the starter suite
 ```
 
@@ -46,7 +46,9 @@ Inside the throwaway workspace, file and memory writes are preapproved. Shell, U
 | `answer_contains` / `answer_not_contains` | the final answer includes / excludes `text` |
 | `answer_matches` | `pattern` is found in the final answer |
 
-`contains` checks accept `"ignore_case": true`. Fixture paths follow the same rules as file tools: no traversal, symlinks, VCS metadata, `.env`, or credential files. Suites are validated before any model request.
+`contains`, `equals`, and `matches` checks accept `"ignore_case": true`. Fixture and check paths follow the same rules as file tools (no traversal, symlinks, VCS metadata, `.env`, or credential files), `file_unchanged` must name a fixture file, and `contains` text must be non-empty. All of this is validated before any model request. A task's `max_steps` replaces `--max-steps` for that task.
+
+Suites are trusted local files, like test code: their regular expressions run in-process, so a pathological pattern can make a check slow.
 
 Checks are declarative on purpose: Eira does not run model-written code on your host. For behavioral checks, run your project's tests yourself in the kept workspaces, or in Docker.
 
@@ -62,8 +64,8 @@ Checks are declarative on purpose: Eira does not run model-written code on your 
 | `find-in-large-file` | Find one line in a 3,000-line file using search or paging |
 | `protected-file-honesty` | Report that a file with a credential cannot be edited, rather than claiming success |
 
-A scripted oracle in `tests/test_evals.py` solves every starter task with Eira's real tools, and a do-nothing provider fails all of them. Both are run in CI, so a check that is impossible or always passes is caught. The starter suite is small and is a smoke test, not a benchmark. Write suites from your own repositories for decisions that matter, and use `--repeat` to see run-to-run variance.
+A scripted oracle in `tests/test_evals.py` solves every starter task with Eira's real tools, and a do-nothing provider fails every task. Both run in CI, so an impossible check, or a task whose checks all pass without any work, is caught. A single check that always passes alongside others that fail is not. The starter suite is small and is a smoke test, not a benchmark. Write suites from your own repositories for decisions that matter, and use `--repeat` to see run-to-run variance.
 
 ## Report fields
 
-`summary` has `runs`, `passed`, `pass_rate`, `steps`, `tool_calls`, `tool_errors`, `tokens`, and `seconds`. Each item in `results` has the task id, run number, status (`completed`, `stopped`, or `error`), and per-check results with failure details. It also has the metrics above, the first 2,000 characters of the final answer, and, with `--work-dir`, the workspace path. Tokens are provider-reported usage, including cached prompt tokens. They are not a bill.
+`summary` has `runs`, `passed`, `pass_rate`, `steps`, `tool_calls`, `tool_errors`, `tokens`, and `seconds`. `tool_calls` and `tool_errors` count only calls that were executed; tokens include runs that ended in an error. Each item in `results` has the task id, run number, status (`completed`, `stopped`, or `error`), and per-check results with failure details. It also has the metrics above, the first 2,000 characters of the redacted final answer, and, with `--work-dir`, the workspace path. Tokens are provider-reported usage, including cached prompt tokens. They are not a bill.

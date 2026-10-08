@@ -33,7 +33,9 @@ endpoints.
 
 Current Claude models think by default and return `thinking` blocks, whose
 text is empty unless the request asks for a summary. Eira stores them with the turn and sends them back unchanged and in
-their original positions. Requests carry two `cache_control` breakpoints: one
+their original positions. If secret redaction would change any block of a
+turn, Eira stores that turn without its blocks and sends no reasoning up to
+it, which the API accepts, instead of a modified block, which it rejects. Requests carry two `cache_control` breakpoints: one
 on the system prompt, which also covers the tool definitions, and one on the
 newest turn. Because Eira keeps each session's prefix append-only, every
 request can read the previous one from the cache. `usage` cache counters are
@@ -42,7 +44,7 @@ preserved and included in `total_tokens`.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--max-output-tokens` | 16000 | Anthropic `max_tokens`; thinking counts toward it. Lower it for older models with smaller limits. |
-| `--model-timeout` | 300 | Seconds per model request including retries, for every profile (max 900) |
+| `--model-timeout` | 600 | Seconds per model request including retries, for every profile (max 900) |
 | `--no-prompt-cache` | off | Send no `cache_control` markers |
 
 Eira does not send a `thinking` parameter, so each model uses its own default.

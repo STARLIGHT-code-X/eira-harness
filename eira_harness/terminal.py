@@ -143,7 +143,10 @@ class Terminal:
             self._write(self._paint(self.palette.muted, f"  · model ready{elapsed}{cache}"))
         elif kind == "tool_started":
             name = self._safe(event.get("name", "tool"), 160)
-            detail = self._field(event.get("detail") or "", max(0, self.width - len(name) - 8))
+            room = max(0, self.width - len(name) - 8)
+            detail = " ".join(self._safe(event.get("detail") or "", 500).split())
+            # Keep the head: a path or command reads from its start.
+            detail = detail if len(detail) <= room else (detail[:room - 1] + "…" if room > 1 else "")
             line = self._paint(self.palette.cyan, f"  → {name}")
             self._write(line + (self._paint(self.palette.muted, f"  {detail}") if detail else ""))
         elif kind == "compaction_started":

@@ -75,9 +75,16 @@ class EditingTests(unittest.TestCase):
                 self.tools.edit_file(path, old, new)
         with self.assertRaisesRegex(HarnessError, "write_file"):
             self.tools.edit_file("missing.txt", "a", "b")
-        for path in ["../outside.txt", ".env", ".git/config"]:
-            with self.subTest(path=path), self.assertRaises(HarnessError):
+        outside = self.root.parent / f"{self.root.name}-outside.txt"
+        outside.write_text("a")
+        self.addCleanup(outside.unlink)
+        (self.root / ".git").mkdir()
+        for name in [".env", ".git/config"]:
+            (self.root / name).write_text("a")
+        for path in [f"../{outside.name}", ".env", ".git/config"]:
+            with self.subTest(path=path), self.assertRaisesRegex(HarnessError, "blocked|outside"):
                 self.tools.edit_file(path, "a", "b")
+        self.assertEqual([outside.read_text(), (self.root / ".env").read_text()], ["a", "a"])
 
     def test_concurrent_change_during_approval_cancels_edit(self):
         self.write("a.txt", "alpha\n")

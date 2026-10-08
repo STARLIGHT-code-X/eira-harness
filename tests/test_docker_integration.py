@@ -1,7 +1,8 @@
 """Real-daemon checks for Docker shell mode.
 
 Skipped unless EIRA_DOCKER_IMAGE names a pre-pulled image with /bin/sh and
-python, for example:
+python. Set EIRA_REQUIRE_DOCKER=1 (as CI does) to fail instead of skipping
+when the daemon or image is unavailable. For example:
 
     EIRA_DOCKER_IMAGE=python:3.11-slim python3 -m unittest tests.test_docker_integration -v
 """
@@ -26,7 +27,22 @@ def daemon_ready() -> bool:
     return probe.returncode == 0
 
 
-@unittest.skipUnless(daemon_ready(), "set EIRA_DOCKER_IMAGE to a pre-pulled image to run Docker integration tests")
+READY = daemon_ready()
+REQUIRED = os.environ.get("EIRA_REQUIRE_DOCKER") == "1"
+
+
+def eira_containers() -> set[str]:
+    listed = subprocess.run(["docker", "ps", "-aq", "--filter", "name=^eira-"], capture_output=True, text=True)
+    return set(listed.stdout.split())
+
+
+class DockerRequirementTest(unittest.TestCase):
+    @unittest.skipUnless(REQUIRED, "EIRA_REQUIRE_DOCKER is not set")
+    def test_required_docker_is_available(self):
+        self.assertTrue(READY, f"EIRA_REQUIRE_DOCKER=1 but Docker or image {IMAGE!r} is unavailable")
+
+
+@unittest.skipUnless(READY, "set EIRA_DOCKER_IMAGE to a pre-pulled image to run Docker integration tests")
 class DockerShellIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -59,15 +75,16 @@ class DockerShellIntegrationTests(unittest.TestCase):
                          "    print('network: open')\n"
                          "except OSError:\n"
                          "    print('network: blocked')\n"
-                         "print([l.split()[1] for l in open('/proc/self/status') if l.startswith('CapEff')][0])\n"
-                         "try:\n"
-                         "    open('/usr/eira-test', 'w')\n"
-                         "    print('root: writable')\n"
-                         "except OSError:\n"
-                         "    print('root: read-only')\n"
+                         "status = dict(l.split(':', 1) for l in open('/proc/self/status'))\n"
+                         "print(status['CapEff'].strip(), status['CapBnd'].strip())\n"
+                         "root = [l.split()[3].split(',') for l in open('/proc/mounts') if l.split()[1] == '/']\n"
+                         "print('root:', 'ro' if 'ro' in root[-1] else 'rw')\n"
                          "EOF")
         self.assertEqual(result["exit_code"], 0, result)
-        self.assertEqual(result["output"].split("\n")[:3], ["network: blocked", "0000000000000000", "root: read-only"])
+        # The bounding set and mount flags hold regardless of the container
+        # user, so these checks are meaningful for root and non-root runs.
+        self.assertEqual(result["output"].split("\n")[:3],
+                         ["network: blocked", "0000000000000000 0000000000000000", "root: ro"])
 
     def test_eira_state_is_hidden_from_commands(self):
         self.assertTrue((self.root / ".eira" / "state.db").exists())
@@ -79,13 +96,13 @@ class DockerShellIntegrationTests(unittest.TestCase):
         self.assertEqual(result["output"].split(), ["hidden", "unreadable"])
 
     def test_timeout_and_output_limits_stop_and_remove_container(self):
+        before = eira_containers()
         result = self.sh("sleep 20", timeout=2)
         self.assertEqual(result["stopped"], "timeout")
         result = self.sh("python -c \"import sys; sys.stdout.write('x' * 2000000)\"")
         self.assertEqual(result["stopped"], "output_limit")
         self.assertTrue(result["truncated"])
-        leftovers = subprocess.run(["docker", "ps", "-aq", "--filter", "name=eira-"], capture_output=True, text=True)
-        self.assertEqual(leftovers.stdout.strip(), "")
+        self.assertEqual(eira_containers() - before, set())
 
     def test_denied_command_never_starts_a_container(self):
         self.tools.policy.approve = lambda name, detail: False

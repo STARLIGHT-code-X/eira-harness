@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -31,9 +32,83 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _diff(path: str, old: str, new: str) -> str:
-    return "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True),
-                                        fromfile=path + " (before)", tofile=path + " (after)"))
+_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$")
+_TERMINATOR = re.compile(r"\r\n|\r|\n")
+_HUNK = re.compile(r"^@@ -(\d+)(,\d+)? \+(\d+)(,\d+)? @@")
+
+
+def _lines(text: str) -> list[str]:
+    """Split on \\n, \\r\\n and \\r only, keeping endings; one rule for every tool."""
+    return _LINE.findall(text)
+
+
+def _json_len(text: str) -> int:
+    return len(json.dumps(text, ensure_ascii=False)) - 2
+
+
+def _diff(path: str, old: str, new: str, context: int = 3) -> str:
+    a, b = _lines(old), _lines(new)
+    # Diff only the changed region plus context: difflib's cost grows with the
+    # square of what it compares, and files may now be several megabytes.
+    start = 0
+    while start < min(len(a), len(b)) and a[start] == b[start]:
+        start += 1
+    end = 0
+    while end < min(len(a), len(b)) - start and a[-1 - end] == b[-1 - end]:
+        end += 1
+    lo = max(0, start - context)
+    tail = max(0, end - context)
+    a_mid, b_mid = a[lo:len(a) - tail], b[lo:len(b) - tail]
+    if len(a_mid) > 20_000 and len(b_mid) > 20_000:
+        body = [f"@@ -{lo + 1},{len(a_mid)} +{lo + 1},{len(b_mid)} @@\n"]
+        body += ["-" + line for line in a_mid] + ["+" + line for line in b_mid]
+        lines = [f"--- {path} (before)\n", f"+++ {path} (after)\n", *body]
+    else:
+        lines = list(difflib.unified_diff(a_mid, b_mid, fromfile=path + " (before)", tofile=path + " (after)", n=context))
+    out = []
+    for line in lines:
+        match = _HUNK.match(line)
+        if match and lo:
+            line = (f"@@ -{int(match[1]) + lo}{match[2] or ''} +{int(match[3]) + lo}{match[4] or ''} @@"
+                    + line[match.end():])
+        if not line.endswith(("\n", "\r")):
+            line += "\n\\ No newline at end of file\n"
+        out.append(line)
+    return "".join(out)
+
+
+def _glob_regex(pattern: str) -> str:
+    out, index = [], 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            out.append("(?:.*/)?")
+            index += 3
+        elif pattern.startswith("**", index):
+            out.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            out.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            out.append("[^/]")
+            index += 1
+        elif pattern[index] == "[" and "]" in pattern[index + 2:]:
+            close = pattern.index("]", index + 2)
+            body = pattern[index + 1:close].replace("\\", "\\\\")
+            out.append("[^" + body[1:] + "]" if body.startswith("!") else "[" + body + "]")
+            index = close + 1
+        else:
+            out.append(re.escape(pattern[index]))
+            index += 1
+    return "".join(out)
+
+
+def glob_match(relative: str, pattern: str) -> bool:
+    """Patterns without '/' match file names at any depth; with '/', '**' spans directories."""
+    pattern = pattern.removeprefix("./")
+    if "/" not in pattern:
+        return fnmatch.fnmatchcase(relative.rsplit("/", 1)[-1], pattern)
+    return re.fullmatch(_glob_regex(pattern), relative) is not None
 
 
 @dataclass
@@ -102,7 +177,8 @@ class Toolbox:
     def __init__(self, workspace: Workspace, store: Store, policy: Policy, session: str):
         self.workspace, self.store, self.policy, self.session = workspace, store, policy, session
         self.registry: dict[str, Tool] = {}
-        glob = string("Optional shell-style filter on the relative path, such as *.py (* also matches /)", maxLength=200)
+        glob = string("Optional filter. Without '/', matches file names at any depth (*.py); with '/', '*' stays in one "
+                      "directory and '**' spans directories (src/**/*.py)", maxLength=200)
         self.register(Tool("list_files", "List workspace files; hidden and credential paths are excluded.",
                            {"path": string("Relative directory (default '.')"), "glob": glob}, [], self.list_files))
         self.register(Tool("read_file", "Read a UTF-8 workspace file, optionally a line range. Long files are returned in pages; "
@@ -184,7 +260,8 @@ class Toolbox:
                 text += f":{arguments.get('start_line', 1)}-{arguments.get('end_line', '')}"
         if isinstance(arguments.get("glob"), str):
             text += f" ({arguments['glob']})"
-        text = " ".join(str(text).split())
+        # Redact before cutting, so a cut can never split a secret past the redactor.
+        text = " ".join(self.store.redact(str(text)).split())
         return text if len(text) <= 100 else text[:99] + "…"
 
     def list_files(self, path=".", glob=None):
@@ -213,7 +290,7 @@ class Toolbox:
                     if entry.is_dir(follow_symlinks=False):
                         pending.append((Path(entry.path), depth + 1))
                     elif entry.is_file(follow_symlinks=False):
-                        if glob and not fnmatch.fnmatchcase(relative, glob):
+                        if glob and not glob_match(relative, glob):
                             continue
                         paths.append(relative)
                         if len(paths) >= 500:
@@ -224,24 +301,37 @@ class Toolbox:
         text = self.workspace.read(path, MAX_TEXT_FILE)
         visible = self.store.redact(text)
         protected = visible != text
-        lines = visible.splitlines(keepends=True)
+        lines = _lines(visible)
         total = len(lines)
         if start_line > max(total, 1):
             raise HarnessError(f"start_line is past the end of the file ({total} lines).")
         if end_line is not None and end_line < start_line:
             raise HarnessError("end_line must not be before start_line.")
         last = total if end_line is None else min(end_line, total)
-        chunk, chars = [], 0
+        # Budget by encoded size, because the result travels as JSON and escapes
+        # (quotes, backslashes, newlines, control characters) grow it.
+        chunk, chars, cut_line = [], 0, False
         for line in lines[start_line - 1:last]:
-            if chunk and (len(chunk) >= READ_PAGE_LINES or chars + len(line) > READ_PAGE_CHARS):
+            cost = _json_len(line)
+            if chunk and (len(chunk) >= READ_PAGE_LINES or chars + cost > READ_PAGE_CHARS):
+                break
+            if not chunk and cost > READ_PAGE_CHARS:
+                keep = READ_PAGE_CHARS
+                while _json_len(line[:keep]) > READ_PAGE_CHARS:
+                    keep = keep * 3 // 4
+                chunk, cut_line = [line[:keep]], True
                 break
             chunk.append(line)
-            chars += len(line)
+            chars += cost
         shown_end = start_line - 1 + len(chunk)
         result = {"path": path, "sha256": None if protected else _sha(text), "content": "".join(chunk),
                   "start_line": start_line, "end_line": shown_end, "total_lines": total,
                   "editable": not protected,
                   "note": "Contains protected values; model edits are disabled." if protected else ""}
+        if cut_line:
+            result["line_truncated"] = True
+            result["note"] = (result["note"] + " Line {} is longer than one page; only its start is shown. "
+                              "Use search_files to locate text within it.".format(start_line)).strip()
         if shown_end < last:
             result.update(truncated=True, next_start_line=shown_end + 1)
         return result
@@ -285,49 +375,66 @@ class Toolbox:
         if old_string == new_string:
             raise HarnessError("old_string and new_string are identical; nothing to change.")
         search, replacement = old_string, new_string
-        count = old.count(search)
-        if not count and "\r\n" in old and "\r\n" not in old_string:
-            # Models usually emit LF; match a CRLF file without changing its line endings.
+        if "\r\n" in old and "\n" not in old.replace("\r\n", "") and "\r" not in old.replace("\r\n", ""):
+            # Models usually emit LF. In a CRLF file, use CRLF for both sides so
+            # the file keeps one line-ending style.
+            search = old_string.replace("\r\n", "\n").replace("\n", "\r\n")
+            replacement = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
+        elif search not in old and "\r\n" in old and "\r\n" not in old_string:
             search, replacement = old_string.replace("\n", "\r\n"), new_string.replace("\n", "\r\n")
-            count = old.count(search)
-        if not count:
+        first = old.find(search)
+        if first < 0:
             raise HarnessError("old_string was not found. Read the file again and copy the exact text, including whitespace and indentation.")
-        if count > 1 and not replace_all:
-            raise HarnessError(f"old_string matches {count} places. Include more surrounding lines to make it unique, or set replace_all.")
+        count = old.count(search)
+        if not replace_all and (count > 1 or old.find(search, first + 1) >= 0):
+            raise HarnessError(f"old_string matches {max(count, 2)} places. Include more surrounding lines to make it unique, or set replace_all.")
+        replacements = count if replace_all else 1
+        if len(old) + replacements * (len(replacement) - len(search)) > MAX_TEXT_FILE:
+            raise HarnessError(f"The edited file would exceed the {MAX_TEXT_FILE:,}-character limit.")
         content = old.replace(search, replacement, -1 if replace_all else 1)
+        self._check_editable(content)
         self.policy.require("edit_file", _diff(path, old, content), workspace_write=True)
         # Recheck after the human approval wait.
         self.workspace.path(path)
         if _sha(self.workspace.read(path, MAX_TEXT_FILE)) != digest:
             raise HarnessError("File changed during approval; edit cancelled.")
         atomic_write(target, content, overwrite=True)
-        first = old[:old.index(search)].count("\n") + 1
-        lines = content.splitlines()
-        context = lines[max(0, first - 4):first + replacement.count("\n") + 3]
-        return {"path": path, "changed": True, "replacements": count if replace_all else 1,
-                "sha256": _sha(content), "first_changed_line": first,
+        line = len(_TERMINATOR.findall(old[:first])) + 1
+        lines = [item.rstrip("\r\n") for item in _lines(content)]
+        context = lines[max(0, line - 4):line + len(_TERMINATOR.findall(replacement)) + 3]
+        return {"path": path, "changed": True, "replacements": replacements,
+                "sha256": _sha(content), "first_changed_line": line,
                 "snippet": "\n".join(context)[:2_000]}
 
     def search_files(self, query, path=".", glob=None, ignore_case=False):
         if not query:
             raise HarnessError("Search query cannot be empty.")
         needle = query.casefold() if ignore_case else query
-        matches = []
+        matches, skipped = [], 0
         files = self.list_files(path, glob)
         deadline = time.monotonic() + 5
+
+        def done(truncated):
+            result = {"matches": matches, "truncated": truncated}
+            if skipped:
+                result["skipped_files"] = skipped
+                result["note"] = "Some files were skipped because they are binary, not UTF-8, protected, or over 5 MB."
+            return result
         for name in files["files"]:
             if time.monotonic() > deadline:
-                return {"matches": matches, "truncated": True}
+                return done(True)
             try:
-                lines = self.workspace.read(name, 1_000_000).splitlines()
+                lines = _lines(self.workspace.read(name, MAX_TEXT_FILE))
             except (HarnessError, UnicodeError, OSError):
+                skipped += 1
                 continue
             for number, line in enumerate(lines, 1):
+                line = line.rstrip("\r\n")
                 if needle in (line.casefold() if ignore_case else line):
                     matches.append({"path": name, "line": number, "text": line[:500]})
                     if len(matches) >= 50:
-                        return {"matches": matches, "truncated": True}
-        return {"matches": matches, "truncated": files["truncated"]}
+                        return done(True)
+        return done(files["truncated"])
 
     def fetch_url(self, url):
         parsed = validate_url(url)

@@ -54,4 +54,5 @@ jobs:
       - name: Exercise Docker shell mode against a real daemon
         env:
           EIRA_DOCKER_IMAGE: python:3.11-slim
+          EIRA_REQUIRE_DOCKER: '1'
         run: python -m unittest tests.test_docker_integration -v
