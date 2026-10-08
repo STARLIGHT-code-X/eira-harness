@@ -34,6 +34,7 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | `market_data.py` | Fixed-source daily price retrieval and CSV normalization |
 | `finance.py` | Deterministic SMA simulation, metrics, report formatting |
 | `store.py` | SQLite journal, workspace memory, per-session file locks |
+| `approvals.py` | Pure shell approval decisions for `--shell-approval`: the decision table, the destructive-command heuristic, journaled trust-handoff alerts |
 | `evals.py` | Task suites, throwaway workspaces, declarative checks, reports |
 | `demo.py` | Synthetic data generator and offline fixture provider |
 

@@ -212,7 +212,7 @@
   "type": "function",
   "function": {
    "name": "shell",
-   "description": "Run a command only when shell mode is enabled and the user explicitly approves this exact command. Never bypass denied tools.",
+   "description": "Run a command in the Docker sandbox when shell mode is enabled: no network, read-only system, secrets hidden, VCS and tool config read-only, workspace writable. Depending on the session, the user approves each command or protected commands run automatically; destructive commands always ask. Never use the shell to bypass a denied tool.",
    "parameters": {
     "type": "object",
     "properties": {

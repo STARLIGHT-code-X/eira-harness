@@ -87,7 +87,7 @@ class Terminal:
             self._row(f"model      {self._field(model_text, inner - 12)}", inner),
             self._row(f"version    {self._field(__version__, inner - 12)}", inner),
             self._row(f"session    {self._field(self._session, inner - 12)}", inner),
-            self._row(f"access     {permission}  shell: {self._field(self._safe(shell, 16), inner - 31)}", inner),
+            self._row(f"access     {permission}  shell: {self._field(self._safe(shell, 40), inner - 31)}", inner),
         ]
         top = "╭" + "─" * inner + "╮"
         bottom = "╰" + "─" * inner + "╯"
@@ -149,6 +149,8 @@ class Terminal:
             detail = detail if len(detail) <= room else (detail[:room - 1] + "…" if room > 1 else "")
             line = self._paint(self.palette.cyan, f"  → {name}")
             self._write(line + (self._paint(self.palette.muted, f"  {detail}") if detail else ""))
+        elif kind == "approval_decided" and event.get("decision") == "auto":
+            self._write(self._paint(self.palette.muted, "  · running in the sandbox without approval"))
         elif kind == "compaction_started":
             self._write(self._paint(self.palette.muted, "  · compacting context…"))
         elif kind == "context_compacted":

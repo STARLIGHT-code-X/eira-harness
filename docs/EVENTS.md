@@ -25,3 +25,9 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 | `reasoning_withheld` | `reason` (`"redaction"`) | Redaction would have changed signed provider blocks, so the turn was journaled without them |
 | `plan` | `plan` (str) | Journal only, never emitted: the `set_plan` tool recorded the plan |
 | `error` | `error` (str, redacted) | CLI only, never journaled and without `session`: with `--json`, the command ended with an error and exits 2 (a failed run prints `run_failed` first) |
+
+## Sandboxed autorun
+
+| Event | Fields | When |
+|---|---|---|
+| `approval_decided` | `tool` (`"shell"`), `decision` (`"auto"`, `"approved"` or `"denied"`), `reason` (str: `"sandboxed"` for auto, otherwise why review was needed, such as `"approval mode always"` or `recursive rm of "."`), `command_sha256` (str, hex SHA-256 of the command) | Inside a shell call, after the approval decision and before the container starts; not emitted when the command is rejected earlier (shell disabled, credentials, read-only) |

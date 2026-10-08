@@ -19,6 +19,7 @@ import time
 from typing import Callable
 import uuid
 
+from . import approvals
 from .finance import backtest
 from .network import fetch_public, validate_url
 from .security import HarnessError, Workspace, atomic_write
@@ -207,6 +208,7 @@ class Policy:
     allowed_hosts: set[str] = field(default_factory=set)
     allowed_data_sources: set[str] = field(default_factory=set)
     shell_mode: str = "disabled"
+    shell_approval: str = "always"
     docker_image: str = "python:3.11-slim"
     read_only: bool = False
 
@@ -308,7 +310,10 @@ class Toolbox:
             {"source": string("Data source", enum=["alphavantage", "coinbase"]),
              "symbol": string("Ticker or crypto pair (for example BTC-USD)", maxLength=30)},
             ["source", "symbol"], self.market_prices, effects=frozenset({"network"})))
-        self.register(Tool("shell", "Run a command only when shell mode is enabled and the user explicitly approves this exact command. Never bypass denied tools.",
+        self.register(Tool("shell", "Run a command in the Docker sandbox when shell mode is enabled: no network, read-only system, "
+                           "secrets hidden, VCS and tool config read-only, workspace writable. Depending on the session, the user approves "
+                           "each command or protected commands run automatically; destructive commands always ask. "
+                           "Never use the shell to bypass a denied tool.",
                            {"command": string("Command for /bin/sh", maxLength=10_000),
                             "timeout": {"type": "integer", "minimum": 1, "maximum": 120}}, ["command"], self.shell, effects=frozenset({"exec", "write"})))
         self.register(Tool("backtest_sma", "Backtest a long/cash moving-average strategy on a local daily date,close CSV. Prior-bar signals, next-close fills, fees, slippage, drawdown stop. Does not place real orders.",
@@ -602,7 +607,30 @@ class Toolbox:
         return {"detail": f"Mode: docker\nDirectory: {self.workspace.root}\nTimeout: {timeout}s\nCommand:\n{command}"}
 
     def _shell_approve(self, command, timeout, plan):
-        self.policy.require("shell", plan["detail"])
+        sandboxed = getattr(self.policy, "shell_approval", "always") == "sandboxed"
+        if sandboxed and not getattr(self, "_journal_alerts_loaded", False):
+            # Once per Toolbox: alerts raised by earlier turns or before a resume still apply.
+            self._journal_alerts_loaded = True
+            for path in approvals.journaled_alerts(self.store.events(self.session)):
+                if path not in self.shell_alerts:
+                    self.shell_alerts.append(path)
+        decision = approvals.decide_shell(self.policy, plan, command, self.shell_alerts)
+
+        def audit(outcome):
+            self.notify("approval_decided", tool="shell", decision=outcome, reason=decision.reason,
+                        command_sha256=_sha(command))
+        if decision.action == "auto":
+            audit("auto")
+            return
+        detail = plan["detail"] + (f"\nReason for review: {decision.reason}" if sandboxed else "")
+        try:
+            self.policy.require("shell", detail)
+        except HarnessError:
+            audit("denied")
+            raise
+        audit("approved")
+        # A human approval acknowledges the pending trust-handoff alerts.
+        self.shell_alerts.clear()
 
     def _shell_run(self, command, timeout, plan) -> dict:
         docker = shutil.which("docker")
