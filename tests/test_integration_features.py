@@ -11,7 +11,10 @@ import unittest
 from unittest.mock import patch
 
 from eira_harness.cli import main
-from tests.fakes import fake_docker
+try:  # discovered as top-level modules (`-s tests`) or as a package
+    from fakes import fake_docker
+except ImportError:
+    from tests.fakes import fake_docker
 
 
 def tool_call(name, arguments, call_id):

@@ -17,8 +17,12 @@ from eira_harness.evalstats import classify, pass_at_k, wilson
 from eira_harness.harnesses import parse_codex_events
 from eira_harness.security import HarnessError, Workspace
 from eira_harness.suites import CODING_SUITE
-from tests.fakes import fake_docker
-from tests.test_evals import Lazy, Oracle
+try:  # discovered as top-level modules (`-s tests`) or as a package
+    from fakes import fake_docker
+    from test_evals import Lazy, Oracle
+except ImportError:
+    from tests.fakes import fake_docker
+    from tests.test_evals import Lazy, Oracle
 
 IMAGE = os.environ.get("EIRA_DOCKER_IMAGE", "")
 FAKES = Path(__file__).resolve().parent / "fakes"
