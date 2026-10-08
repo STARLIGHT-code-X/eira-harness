@@ -25,3 +25,10 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 | `reasoning_withheld` | `reason` (`"redaction"`) | Redaction would have changed signed provider blocks, so the turn was journaled without them |
 | `plan` | `plan` (str) | Journal only, never emitted: the `set_plan` tool recorded the plan |
 | `error` | `error` (str, redacted) | CLI only, never journaled and without `session`: with `--json`, the command ended with an error and exits 2 (a failed run prints `run_failed` first) |
+
+## Shell sandbox (shell-protected-paths)
+
+| Event | Fields | When |
+|---|---|---|
+| `sandbox_prepared` | `container` (str), `masked` (int), `read_only` (int), `sanitized_git_config` (int), `entries_scanned` (int), `seconds` (float) | An approved shell command's mount plan was rechecked and its sanitized git config copies written, just before the container starts |
+| `sandbox_protected_path_created` | `paths` (list of str, workspace-relative) | After a shell command, when it created or replaced protected config paths; the result also carries `protected_paths_created` (see [SANDBOX.md](SANDBOX.md)) |

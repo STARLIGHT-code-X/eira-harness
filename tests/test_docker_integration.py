@@ -104,6 +104,61 @@ class DockerShellIntegrationTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertEqual(eira_containers() - before, set())
 
+    def protected_fixture(self):
+        files = {".env": "SECRET=fixture\n", ".ssh/id_rsa": "key\n", ".git/hooks/pre-commit": "original\n",
+                 ".git/HEAD": "ref: refs/heads/main\n", "AGENTS.md": "rules\n", ".devcontainer/devcontainer.json": "{}\n",
+                 ".devcontainer/.env": "DEV=secret\n", ".github/workflows/ci.yml": "on: push\n",
+                 ".git/config": "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://u:ghp_fixture@github.com/x/y\n"}
+        for relative, text in files.items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        (self.root / "src").mkdir()
+        (self.root / ".git" / "objects").mkdir()
+        (self.root / ".git" / "refs").mkdir()
+
+    def test_secrets_are_masked_and_config_is_read_only(self):
+        self.protected_fixture()
+        before = eira_containers()
+        result = self.sh("cat .env")
+        self.assertEqual((result["exit_code"], result["output"]), (0, ""))
+        self.assertIn("secret paths hidden", self.approved[-1])
+        result = self.sh("echo x > .git/hooks/pre-commit")
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertIn("Read-only file system", result["output"])
+        self.assertEqual((self.root / ".git/hooks/pre-commit").read_text(), "original\n")
+        result = self.sh("ls -A .ssh 2>/dev/null; echo end")
+        self.assertEqual(result["output"], "end\n")
+        result = self.sh("echo x >> AGENTS.md")
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertIn("Read-only file system", result["output"])
+        self.assertEqual((self.root / "AGENTS.md").read_text(), "rules\n")
+        result = self.sh("echo x > .github/workflows/evil.yml")
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertFalse((self.root / ".github/workflows/evil.yml").exists())
+        # A secret inside a read-only config directory is masked too.
+        result = self.sh("cat .devcontainer/.env; cat .devcontainer/devcontainer.json")
+        self.assertEqual((result["exit_code"], result["output"]), (0, "{}\n"))
+        result = self.sh("cat .git/config")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertNotIn("ghp_fixture", result["output"])
+        self.assertIn("url = https://github.com/x/y", result["output"])
+        result = self.sh("echo ok > src/new.txt && echo $HOME $GIT_OPTIONAL_LOCKS $PAGER")
+        self.assertEqual((result["exit_code"], result["output"]), (0, "/tmp 0 cat\n"))
+        self.assertEqual((self.root / "src/new.txt").read_text(), "ok\n")
+        result = self.sh("if command -v git >/dev/null; then git status --porcelain >/dev/null && echo status-ok; "
+                         "else echo no-vcs-tool; fi")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertIn(result["output"].strip(), {"status-ok", "no-vcs-tool"})
+        self.assertEqual(eira_containers() - before, set())
+        self.assertFalse((self.root / ".eira" / "sandbox").exists() and any((self.root / ".eira" / "sandbox").iterdir()))
+
+    def test_created_protected_path_is_reported(self):
+        result = self.sh("mkdir .vscode && echo {} > .vscode/tasks.json")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertEqual(result["protected_paths_created"], [".vscode"])
+        self.assertEqual(self.tools.shell_alerts, [".vscode"])
+
     def test_denied_command_never_starts_a_container(self):
         self.tools.policy.approve = lambda name, detail: False
         with self.assertRaises(HarnessError):
