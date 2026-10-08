@@ -396,11 +396,13 @@ class Provider:
         self.metadata = dict(self.profile)
         self.public_only = public_only
 
-    def complete(self, messages: list[dict], tools: list[dict]) -> tuple[dict, dict]:
+    def complete(self, messages: list[dict], tools: list[dict], tool_choice: str = "auto") -> tuple[dict, dict]:
+        if tool_choice not in {"auto", "none"}:
+            raise HarnessError("tool_choice must be 'auto' or 'none'.")
         if self.profile["transport"] == "anthropic":
             system, native = _anthropic_messages(messages)
             payload = {"model": self.model, "max_tokens": self.max_output_tokens, "messages": native,
-                       "tools": _anthropic_tools(tools), "tool_choice": {"type": "auto"}}
+                       "tools": _anthropic_tools(tools), "tool_choice": {"type": tool_choice}}
             if system is not None:
                 payload["system"] = system
             if self.prompt_cache:
@@ -415,7 +417,7 @@ class Provider:
             normalise, url = _normalise_anthropic, _endpoint(self.parsed, "messages")
         else:
             _anthropic_tools(tools)
-            payload = {"model": self.model, "messages": _openai_messages(messages), "tools": tools, "tool_choice": "auto"}
+            payload = {"model": self.model, "messages": _openai_messages(messages), "tools": tools, "tool_choice": tool_choice}
             headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"

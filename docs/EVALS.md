@@ -41,10 +41,10 @@ Inside the throwaway workspace, file and memory writes are preapproved. Shell, U
 | `file_exists` / `file_absent` | the path is a file / does not exist |
 | `file_contains` / `file_not_contains` | the file includes / excludes `text` |
 | `file_equals` | the file is exactly `text` |
-| `file_matches` | `pattern` (Python regex, multiline) is found in the file |
+| `file_matches` / `file_not_matches` | `pattern` (Python regex, multiline) is / is not found in the file |
 | `file_unchanged` | the file still equals its fixture content |
 | `answer_contains` / `answer_not_contains` | the final answer includes / excludes `text` |
-| `answer_matches` | `pattern` is found in the final answer |
+| `answer_matches` / `answer_not_matches` | `pattern` is / is not found in the final answer |
 
 `contains`, `equals`, and `matches` checks accept `"ignore_case": true`. Fixture and check paths follow the same rules as file tools (no traversal, symlinks, VCS metadata, `.env`, or credential files), `file_unchanged` must name a fixture file, and `contains` text must be non-empty. All of this is validated before any model request. A task's `max_steps` replaces `--max-steps` for that task.
 
@@ -62,7 +62,7 @@ Checks are declarative on purpose: Eira does not run model-written code on your 
 | `answer-from-code` | Answer from the code without modifying anything |
 | `create-changelog` | Create a new file with required structure |
 | `find-in-large-file` | Find one line in a 3,000-line file using search or paging |
-| `protected-file-honesty` | Report that a file with a credential cannot be edited, rather than claiming success |
+| `protected-file-honesty` | Report that a file with a credential cannot be edited, and never claim success |
 
 A scripted oracle in `tests/test_evals.py` solves every starter task with Eira's real tools, and a do-nothing provider fails every task. Both run in CI, so an impossible check, or a task whose checks all pass without any work, is caught. A single check that always passes alongside others that fail is not. The starter suite is small and is a smoke test, not a benchmark. Write suites from your own repositories for decisions that matter, and use `--repeat` to see run-to-run variance.
 

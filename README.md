@@ -118,7 +118,7 @@ HTTPS is required for remote model endpoints. HTTP is accepted only for loopback
 |---|---|
 | Agent execution | Sequential tool loop, schema validation, bounded steps/calls/context/reported tokens |
 | Models | OpenAI, Anthropic (thinking blocks, prompt caching), OpenRouter, Gemini, Ollama, and custom endpoints |
-| Coding | Exact-match `edit_file`, paged reads of large files, glob/case-insensitive search, reviewed create/replace with stale-content checks |
+| Coding | Exact-match `edit_file`, paged reads of large files, glob (`**`, rooted `./`) and case-insensitive search with match columns, reviewed create/replace with fast, readable diffs and stale-content checks |
 | Long sessions | Frozen per-session prefix, append-only history, summary compaction with originals preserved |
 | Evaluation | `eira eval`: task suites in throwaway workspaces with pass rate, tool errors, tokens, and time |
 | Execution | Disabled by default; per-command approval in Docker, integration-tested against a real daemon |

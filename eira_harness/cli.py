@@ -13,7 +13,7 @@ from .agent import Agent, Limits
 from .demo import DemoProvider, sample_csv
 from .finance import backtest, markdown_report
 from .provider import DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MODEL_TIMEOUT, MAX_MODEL_TIMEOUT, build_provider
-from .security import HarnessError, Redactor, Workspace, atomic_write, clean_terminal, approval_text
+from .security import HarnessError, Redactor, Workspace, atomic_write, clean_terminal, approval_text, redact_tree
 from .store import Store
 from .tools import Policy, Toolbox
 
@@ -356,7 +356,7 @@ def run_eval(args, workspace):
     from .settings import resolve_settings
     suite = load_suite(args.suite, workspace)
     if args.dump_suite:
-        print_safe(json.dumps(suite, indent=2, ensure_ascii=False))
+        print_safe(json.dumps(redact_tree(suite, Redactor()), indent=2, ensure_ascii=False))
         return 0
     target = None
     if args.output:
@@ -390,14 +390,15 @@ def run_eval(args, workspace):
     report = run_suite(suite, lambda: build_provider(args.provider, args.model, args.base_url, **provider_options(args)),
                        limits, repeat=args.repeat, work_dir=work_dir, progress=progress)
     report["provider"] = args.provider
-    encoded = Redactor()(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
+    encoded = json.dumps(redact_tree(report, Redactor()), indent=2, ensure_ascii=False, allow_nan=False)
     if target:
         try:
             atomic_write(target, encoded + "\n", overwrite=False)
         except OSError as exc:
-            # Never lose a paid run: fall back to stdout.
+            # Never lose a paid run: fall back to stdout (once, even with --json).
             print_safe(f"Eira: could not write {target}: {exc}. The report follows on stdout.", file=sys.stderr)
-            print_safe(encoded)
+            if not args.json:
+                print_safe(encoded)
             target = None
     summary = report["summary"]
     if args.json:

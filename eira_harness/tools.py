@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import bisect
+from collections import Counter
 import difflib
-import fnmatch
 import hashlib
 import json
 import os
@@ -48,35 +49,104 @@ def _json_len(text: str) -> int:
     return len(json.dumps(text, ensure_ascii=False)) - 2
 
 
+_SMALL_DIFF = 4_000_000
+
+
+def _opcodes(a, b, alo, ahi, blo, bhi, depth=0):
+    """Opcodes over absolute indices, anchored on lines unique to both sides.
+
+    difflib's matcher is quadratic in the region it compares. Anchoring on
+    unique common lines (the "patience" idea) splits a large region into
+    small gaps, so cost tracks how much changed, not how far apart edits are.
+    """
+    if alo == ahi or blo == bhi:
+        if alo == ahi and blo == bhi:
+            return []
+        return [("insert" if alo == ahi else "delete" if blo == bhi else "replace", alo, ahi, blo, bhi)]
+    if (ahi - alo) * (bhi - blo) <= _SMALL_DIFF:
+        matcher = difflib.SequenceMatcher(None, a[alo:ahi], b[blo:bhi], autojunk=False)
+        return [(t, i1 + alo, i2 + alo, j1 + blo, j2 + blo) for t, i1, i2, j1, j2 in matcher.get_opcodes()]
+    count_a, count_b = Counter(a[alo:ahi]), Counter(b[blo:bhi])
+    where_b = {b[j]: j for j in range(blo, bhi) if count_b[b[j]] == 1 and count_a.get(b[j]) == 1}
+    pairs = [(i, where_b[a[i]]) for i in range(alo, ahi) if a[i] in where_b]
+    # Longest increasing run of b positions: anchors that keep their order.
+    tails, links, back = [], [], {}
+    for index, (_, j) in enumerate(pairs):
+        k = bisect.bisect_left(tails, j)
+        if k == len(tails):
+            tails.append(j)
+            links.append(index)
+        else:
+            tails[k], links[k] = j, index
+        back[index] = links[k - 1] if k else None
+    anchors, node = [], links[-1] if links else None
+    while node is not None:
+        anchors.append(pairs[node])
+        node = back[node]
+    anchors.reverse()
+    if not anchors or depth > 24:
+        return [("replace", alo, ahi, blo, bhi)]
+    out, i, j = [], alo, blo
+    for ai, bj in anchors:
+        out += _opcodes(a, b, i, ai, j, bj, depth + 1)
+        out.append(("equal", ai, ai + 1, bj, bj + 1))
+        i, j = ai + 1, bj + 1
+    return out + _opcodes(a, b, i, ahi, j, bhi, depth + 1)
+
+
+def _range(start: int, stop: int) -> str:
+    length = stop - start
+    if length == 1:
+        return str(start + 1)
+    return f"{start if not length else start + 1},{length}"
+
+
 def _diff(path: str, old: str, new: str, context: int = 3) -> str:
     a, b = _lines(old), _lines(new)
-    # Diff only the changed region plus context: difflib's cost grows with the
-    # square of what it compares, and files may now be several megabytes.
     start = 0
     while start < min(len(a), len(b)) and a[start] == b[start]:
         start += 1
     end = 0
     while end < min(len(a), len(b)) - start and a[-1 - end] == b[-1 - end]:
         end += 1
-    lo = max(0, start - context)
-    tail = max(0, end - context)
-    a_mid, b_mid = a[lo:len(a) - tail], b[lo:len(b) - tail]
-    if len(a_mid) > 20_000 and len(b_mid) > 20_000:
-        body = [f"@@ -{lo + 1},{len(a_mid)} +{lo + 1},{len(b_mid)} @@\n"]
-        body += ["-" + line for line in a_mid] + ["+" + line for line in b_mid]
-        lines = [f"--- {path} (before)\n", f"+++ {path} (after)\n", *body]
-    else:
-        lines = list(difflib.unified_diff(a_mid, b_mid, fromfile=path + " (before)", tofile=path + " (after)", n=context))
-    out = []
-    for line in lines:
-        match = _HUNK.match(line)
-        if match and lo:
-            line = (f"@@ -{int(match[1]) + lo}{match[2] or ''} +{int(match[3]) + lo}{match[4] or ''} @@"
-                    + line[match.end():])
-        if not line.endswith(("\n", "\r")):
-            line += "\n\\ No newline at end of file\n"
-        out.append(line)
-    return "".join(out)
+    codes = ([("equal", 0, start, 0, start)] if start else []) + _opcodes(a, b, start, len(a) - end, start, len(b) - end)
+    if end:
+        codes.append(("equal", len(a) - end, len(a), len(b) - end, len(b)))
+    merged = []
+    for code in codes:
+        if merged and merged[-1][0] == code[0] == "equal":
+            merged[-1] = ("equal", merged[-1][1], code[2], merged[-1][3], code[4])
+        else:
+            merged.append(code)
+    if all(code[0] == "equal" for code in merged):
+        return ""
+    # Hunk grouping as in difflib.SequenceMatcher.get_grouped_opcodes.
+    if merged[0][0] == "equal":
+        t, i1, i2, j1, j2 = merged[0]
+        merged[0] = t, max(i1, i2 - context), i2, max(j1, j2 - context), j2
+    if merged[-1][0] == "equal":
+        t, i1, i2, j1, j2 = merged[-1]
+        merged[-1] = t, i1, min(i2, i1 + context), j1, min(j2, j1 + context)
+    groups, group = [], []
+    for t, i1, i2, j1, j2 in merged:
+        if t == "equal" and i2 - i1 > 2 * context:
+            group.append((t, i1, min(i2, i1 + context), j1, min(j2, j1 + context)))
+            groups.append(group)
+            group = []
+            i1, j1 = max(i1, i2 - context), max(j1, j2 - context)
+        group.append((t, i1, i2, j1, j2))
+    if group and not (len(group) == 1 and group[0][0] == "equal"):
+        groups.append(group)
+    out = [f"--- {path} (before)\n", f"+++ {path} (after)\n"]
+    for group in groups:
+        out.append(f"@@ -{_range(group[0][1], group[-1][2])} +{_range(group[0][3], group[-1][4])} @@\n")
+        for t, i1, i2, j1, j2 in group:
+            if t == "equal":
+                out += [" " + line for line in a[i1:i2]]
+                continue
+            out += ["-" + line for line in a[i1:i2]] if t in {"replace", "delete"} else []
+            out += ["+" + line for line in b[j1:j2]] if t in {"replace", "insert"} else []
+    return "".join(line if line.endswith(("\n", "\r")) else line + "\n\\ No newline at end of file\n" for line in out)
 
 
 def _glob_regex(pattern: str) -> str:
@@ -94,10 +164,20 @@ def _glob_regex(pattern: str) -> str:
         elif pattern[index] == "?":
             out.append("[^/]")
             index += 1
-        elif pattern[index] == "[" and "]" in pattern[index + 2:]:
-            close = pattern.index("]", index + 2)
-            body = pattern[index + 1:close].replace("\\", "\\\\")
-            out.append("[^" + body[1:] + "]" if body.startswith("!") else "[" + body + "]")
+        elif pattern[index] == "[":
+            close = pattern.find("]", index + 2 if pattern.startswith("[!", index) or pattern.startswith("[]", index) else index + 1)
+            if close < 0:
+                out.append(re.escape("["))
+                index += 1
+                continue
+            body = pattern[index + 1:close]
+            negate = body.startswith("!")
+            body = body[1:] if negate else body
+            if not body:
+                raise HarnessError("Invalid glob pattern: empty character class.")
+            body = body.replace("\\", "\\\\").replace("[", "\\[").replace("^", "\\^")
+            # Classes never match the path separator, like '*' and '?'.
+            out.append(f"[^/{body}]" if negate else f"(?!/)[{body}]")
             index = close + 1
         else:
             out.append(re.escape(pattern[index]))
@@ -106,11 +186,18 @@ def _glob_regex(pattern: str) -> str:
 
 
 def glob_match(relative: str, pattern: str) -> bool:
-    """Patterns without '/' match file names at any depth; with '/', '**' spans directories."""
-    pattern = pattern.removeprefix("./")
-    if "/" not in pattern:
-        return fnmatch.fnmatchcase(relative.rsplit("/", 1)[-1], pattern)
-    return re.fullmatch(_glob_regex(pattern), relative) is not None
+    """Patterns without '/' match file names at any depth; with '/', '**' spans directories.
+
+    A leading './' anchors the pattern at the workspace root.
+    """
+    rooted = pattern.startswith("./")
+    pattern = pattern[2:] if rooted else pattern
+    if "/" not in pattern and not rooted:
+        relative = relative.rsplit("/", 1)[-1]
+    try:
+        return re.fullmatch(_glob_regex(pattern), relative) is not None
+    except re.error as exc:
+        raise HarnessError(f"Invalid glob pattern: {exc}.") from exc
 
 
 @dataclass
@@ -285,7 +372,7 @@ class Toolbox:
             except Exception:
                 return ""
         elif name == "search_files" and isinstance(arguments.get("query"), str):
-            text = json.dumps(arguments["query"], ensure_ascii=False)
+            text = json.dumps(self.store.redact(arguments["query"]), ensure_ascii=False)
             if arguments.get("path", ".") != ".":
                 text += f" in {arguments['path']}"
         else:
@@ -421,7 +508,8 @@ class Toolbox:
             search = old_string.replace("\r\n", "\n").replace("\n", "\r\n")
             replacement = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
         elif search not in old and "\r\n" in old and "\r\n" not in old_string:
-            search, replacement = old_string.replace("\n", "\r\n"), new_string.replace("\n", "\r\n")
+            search = old_string.replace("\n", "\r\n")
+            replacement = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
         first = old.find(search)
         if first < 0:
             raise HarnessError("old_string was not found. Read the file again and copy the exact text, including whitespace and indentation.")
@@ -429,8 +517,10 @@ class Toolbox:
         if not replace_all and (count > 1 or old.find(search, first + 1) >= 0):
             raise HarnessError(f"old_string matches {max(count, 2)} places. Include more surrounding lines to make it unique, or set replace_all.")
         replacements = count if replace_all else 1
-        if len(old) + replacements * (len(replacement) - len(search)) > MAX_TEXT_FILE:
-            raise HarnessError(f"The edited file would exceed the {MAX_TEXT_FILE:,}-character limit.")
+        # Limits are in bytes, as every read path counts them.
+        growth = len(replacement.encode()) - len(search.encode())
+        if len(old.encode()) + replacements * growth > MAX_TEXT_FILE:
+            raise HarnessError(f"The edited file would exceed the {MAX_TEXT_FILE:,}-byte limit.")
         content = old.replace(search, replacement, -1 if replace_all else 1)
         self._check_editable(content)
         checks = self.check_write(path, old, content)
@@ -475,8 +565,11 @@ class Toolbox:
                 continue
             for number, line in enumerate(lines, 1):
                 line = line.rstrip("\r\n")
-                if needle in (line.casefold() if ignore_case else line):
-                    matches.append({"path": name, "line": number, "text": line[:500]})
+                column = (line.casefold() if ignore_case else line).find(needle)
+                if column >= 0:
+                    # Show the text around the match, so a hit deep in a long line is visible.
+                    lo = max(0, column - 200) if len(line) > 500 else 0
+                    matches.append({"path": name, "line": number, "column": column + 1, "text": line[lo:lo + 500]})
                     if len(matches) >= 50:
                         return done(True)
         return done(files["truncated"])

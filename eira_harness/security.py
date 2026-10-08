@@ -99,6 +99,23 @@ class Redactor:
         return text
 
 
+def redact_tree(value, redact, depth=0):
+    """Redact every string in a JSON-like value before it is encoded.
+
+    Redacting encoded text misses secrets whose quotes or backslashes were
+    escaped, so callers redact first and encode afterwards.
+    """
+    if depth > 64:
+        raise HarnessError("Data exceeds the nesting limit.")
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [redact_tree(item, redact, depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {redact(str(key)): redact_tree(item, redact, depth + 1) for key, item in value.items()}
+    return value
+
+
 class Workspace:
     BLOCKED = {
         ".eira", ".git", ".hg", ".svn", ".bzr", ".ssh", ".aws", ".gnupg",
