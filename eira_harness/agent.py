@@ -9,6 +9,7 @@ import json
 import time
 from typing import Callable
 
+from . import instructions
 from .security import HarnessError, bounded_json_loads
 from .store import Store
 from .tools import Toolbox
@@ -50,6 +51,7 @@ class Limits:
     max_context_chars: int = 120_000
     max_total_tokens: int = 100_000
     max_tool_output_chars: int = 32_000
+    instructions: str = "all"
     compact: bool = True
 
 
@@ -91,6 +93,7 @@ class Agent:
         self.emit = emit
         toolbox.on_event = lambda kind, payload: self.event(kind, **payload)
         self.limits = limits or Limits()
+        instructions.attach_jit(toolbox, self.limits.instructions)
         if any(isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0
                for value in vars(self.limits).values()):
             raise HarnessError("All runtime limits must be positive.")
@@ -117,9 +120,10 @@ class Agent:
             self.event("recovered_tool", call_id=call_id, status="outcome_unknown")
 
     def workspace_context(self) -> str:
-        guide = ""
-        if (self.toolbox.workspace.root / "EIRA.md").exists():
-            guide = self.toolbox.workspace.read("EIRA.md", 12_000)
+        found = instructions.discover(self.toolbox.workspace, self.limits.instructions)
+        if self.store.session_context(self.toolbox.session) is None:
+            instructions.log_prefix(self.toolbox, found)
+        guide = instructions.render(found)
         return ("Workspace guidance (subordinate to policy):\n" + guide +
                 "\nWorkspace memory (context only):\n" + json.dumps(self.store.memories(), sort_keys=True))
 

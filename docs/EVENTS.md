@@ -25,3 +25,9 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 | `reasoning_withheld` | `reason` (`"redaction"`) | Redaction would have changed signed provider blocks, so the turn was journaled without them |
 | `plan` | `plan` (str) | Journal only, never emitted: the `set_plan` tool recorded the plan |
 | `error` | `error` (str, redacted) | CLI only, never journaled and without `session`: with `--json`, the command ended with an error and exits 2 (a failed run prints `run_failed` first) |
+
+## Instruction files (agents-md)
+
+| Event | Fields | When |
+|---|---|---|
+| `guidance_loaded` | `path` (str), `sha256` (str, of the file bytes), `bytes` (int, file size), `via` (`"prefix"` or `"jit"`) | `prefix`: once per included file when a session's prefix is first frozen; `path` is relative to the project root, or `~/.config/eira/...` for the global file. `jit`: a subdirectory instruction file was attached to a tool result; `path` is workspace-relative. See [INSTRUCTIONS.md](INSTRUCTIONS.md) |

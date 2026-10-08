@@ -28,6 +28,7 @@ Eira has no framework dependency. The executable path is `cli → Agent → Prov
 | `agent.py` | Bounded loop, frozen session prefix, compaction, budget checks, crash recovery |
 | `provider.py` | HTTP transport, Chat Completions and Anthropic Messages translation, prompt caching |
 | `tools.py` | Tool definitions, argument validation, workspace operations, execution policy |
+| `instructions.py` | Instruction-file discovery (EIRA.md, AGENTS.md, fallbacks), the prompt budget, and just-in-time subdirectory guidance |
 | `text.py` | Shared line splitting: only `\r\n`, `\r` and `\n` end a line, as in the file tools |
 | `security.py` | Path checks, atomic file writes, best-effort secret redaction, terminal sanitization |
 | `network.py` | Bounded HTTP transport, total deadlines, address pinning, and text retrieval |
@@ -87,6 +88,7 @@ Metadata and hooks never bypass `Policy.require`. Effects are advisory, `always_
 Providers cache, and newer models bind their reasoning to, the exact request prefix: system prompt, tools, then earlier messages. Eira therefore keeps every request in a session append-only:
 
 - The system prompt, `EIRA.md`, and memory are captured in the `session_context` table on the session's first run. Later changes are detected by digest and appended as a labelled user message on the next task. The original prompt is never rewritten.
+- Instruction files are discovered by `instructions.discover()` (global file, then the git root down to the workspace) and rendered into that frozen prompt. Subdirectory files are attached to tool results by an `after_call` hook (`instructions.attach_jit`), so they never change the prefix. See [INSTRUCTIONS.md](INSTRUCTIONS.md).
 - Tools are registered in a fixed order. Recovery closes interrupted calls by appending results.
 - Tool results are fitted to `max_tool_output_chars` once, when they are journaled, so replays are identical.
 
