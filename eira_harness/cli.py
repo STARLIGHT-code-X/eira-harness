@@ -60,6 +60,7 @@ def limits_from(args) -> Limits:
         max_total_tokens=args.max_tokens,
         instructions=getattr(args, "instructions", None) or ("workspace" if args.command == "eval" else "all"),
         compact=not args.no_compact,
+        checkpoints=not args.no_checkpoints,
     )
 
 
@@ -97,6 +98,8 @@ def renderer(as_json: bool):
             print_safe("  · compacting context…", file=sys.stderr)
         elif kind == "context_compacted":
             print_safe(f"  · context compacted: {event['replaced_messages']} messages summarized; originals stay in the trace", file=sys.stderr)
+        elif kind in {"checkpoint_failed", "checkpoint_skipped"}:
+            print_safe(f"  ! no checkpoint for this step ({event['reason']}); continuing", file=sys.stderr)
         elif kind == "assistant":
             print_safe(event["text"])
         elif kind == "run_completed":
@@ -135,6 +138,7 @@ def build_parser():
                              help="Instruction files to load: global, project and workspace (all; default except eval), "
                                   "workspace only (default for eval), or none")
         command.add_argument("--no-compact", action="store_true", help="Stop at the context limit instead of summarizing older turns")
+        command.add_argument("--no-checkpoints", action="store_true", help="Do not snapshot the workspace before file-changing tools")
 
     def model_options(command):
         workspace(command)
@@ -171,6 +175,23 @@ def build_parser():
     trace = sub.add_parser("trace", help="Export a session's conversation and event journal as JSON")
     workspace(trace)
     trace.add_argument("session")
+    checkpoints = sub.add_parser("checkpoints", help="List a session's workspace checkpoints")
+    workspace(checkpoints)
+    checkpoints.add_argument("--session", help="Session ID (default: the session with the latest checkpoint)")
+    checkpoints.add_argument("--json", action="store_true")
+    diff = sub.add_parser("diff", help="Show workspace changes since a checkpoint")
+    workspace(diff)
+    diff.add_argument("checkpoint", nargs="?", help="ck-<id> or turn:N (default: the session's first checkpoint)")
+    diff.add_argument("--session", help="Session ID (default: the session with the latest checkpoint)")
+    diff.add_argument("--stat", action="store_true", help="List changed files with line counts only")
+    rewind = sub.add_parser("rewind", help="Restore code, conversation, or both to a checkpoint")
+    workspace(rewind)
+    rewind.add_argument("target", help="ck-<id> or turn:N")
+    rewind_mode = rewind.add_mutually_exclusive_group(required=True)
+    for flag in ("code", "conversation", "both"):
+        rewind_mode.add_argument(f"--{flag}", dest="mode", action="store_const", const=flag)
+    rewind.add_argument("--yes", action="store_true", help="Skip the confirmation prompt (for scripts)")
+    rewind.add_argument("--session", help="Session ID (default: the session with the latest checkpoint)")
     memory = sub.add_parser("memory", help="List or remove workspace memory")
     workspace(memory)
     memory.add_argument("--forget", metavar="KEY")
@@ -335,6 +356,8 @@ def run_agent(args, store, workspace):
                 recent = store.sessions()[:20]
                 ui.notice('\n'.join(f'{s["id"]}  {s["title"]}' for s in recent) or 'No saved sessions.')
                 ui.notice('Resume with /resume SESSION_ID')
+            elif command in {'/checkpoints', '/rewind', '/diff'}:
+                chat_checkpoints(command, argument, store, workspace, session, ui)
             elif command == '/resume':
                 store.require(argument)
                 session = argument
@@ -370,6 +393,99 @@ def run_agent(args, store, workspace):
         finally:
             store.redact = Redactor()
     return 0
+
+
+def checkpoint_command(args, store, workspace):
+    from .checkpoints import Checkpoints
+    checkpoints = Checkpoints(store, workspace)
+    session = args.session or checkpoints.default_session()
+    if session is None:
+        if args.command == "checkpoints":
+            print_safe("[]" if args.json else "No checkpoints in this workspace yet.")
+            return 0
+        raise HarnessError("No checkpoints in this workspace yet.")
+    store.require(session)
+    if args.command == "checkpoints":
+        rows = checkpoints.listing(session)
+        print_safe(json.dumps(rows, indent=2) if args.json else f"Session {session}\n" + checkpoints.format_listing(rows))
+        return 0
+    if args.command == "diff":
+        print_safe(checkpoints.diff(session, args.checkpoint, stat_only=args.stat))
+        return 0
+
+    def confirm(summary):
+        print_safe(summary, file=sys.stderr)
+        if args.yes:
+            return True
+        if not sys.stdin.isatty():
+            raise HarnessError("Rewind needs confirmation: run it in a terminal, or pass --yes in scripts.")
+        print("\nRewind now? [y/N] ", end="", file=sys.stderr, flush=True)
+        return sys.stdin.readline().strip().lower() == "y"
+
+    result = checkpoints.rewind(session, args.target, args.mode, confirm)
+    if result is None:
+        print_safe("Rewind cancelled; nothing changed.", file=sys.stderr)
+        return 1
+    print_safe(rewind_message(result), file=sys.stderr)
+    return 0
+
+
+def rewind_message(result) -> str:
+    parts = [f"Rewound {result['mode']} to {result['checkpoint']}"]
+    if result["mode"] != "conversation":
+        parts.append(f"{result['restored']} restored, {result['deleted']} deleted"
+                     + (f"; undo with: eira rewind {result['backup']} --code" if result.get("backup") else ""))
+    if result["mode"] != "code":
+        parts.append(f"{result['hidden_messages']} messages hidden from the model")
+    text = " · ".join(parts)
+    if result.get("prompt") and result["mode"] != "code":
+        text += "\nOriginal prompt:\n" + result["prompt"]
+    return text
+
+
+def chat_checkpoints(command, argument, store, workspace, session, ui):
+    """/checkpoints, /diff and /rewind for the current chat session."""
+    from .checkpoints import Checkpoints
+    checkpoints = Checkpoints(store, workspace)
+    if command == '/checkpoints':
+        ui.notice(checkpoints.format_listing(checkpoints.listing(session)))
+        return
+    if command == '/diff':
+        ui.notice(checkpoints.diff(session, argument or None))
+        return
+    if not argument:
+        ui.notice(checkpoints.format_listing(checkpoints.listing(session)))
+        ui.notice('Rewind with /rewind N (a turn number) or /rewind ck-ID.')
+        return
+
+    def ask(label):
+        print(clean_terminal(label), end='', file=sys.stderr, flush=True)
+        return input().strip().lower()
+
+    choice = ask('Restore [c]ode, con[v]ersation, [b]oth, or [n]othing? ')
+    mode = {'c': 'code', 'v': 'conversation', 'b': 'both'}.get(choice[:1])
+    if mode is None:
+        ui.notice('Rewind cancelled; nothing changed.')
+        return
+
+    def confirm(summary):
+        ui.notice(summary)
+        return ask('Rewind now? [y/N] ') == 'y'
+
+    result = checkpoints.rewind(session, argument, mode, confirm, emit=ui.emit)
+    if result is None:
+        ui.notice('Rewind cancelled; nothing changed.')
+        return
+    if result.get('backup'):
+        ui.notice(f'Undo the file changes with /rewind {result["backup"]} (code).')
+    if mode != 'code' and result.get('prompt'):
+        # Like an edited resend: the original prompt is shown and Up recalls it.
+        recalled = Redactor()(result['prompt'])
+        ui.notice('Original prompt (press Up to edit and resend):\n' + recalled)
+        ui.history.append(recalled)
+        readline = getattr(ui, '_readline', None)
+        if readline is not None:
+            readline.add_history(recalled)
 
 
 def run_eval(args, workspace):
@@ -525,6 +641,8 @@ def main(argv=None):
             print_safe(json.dumps({"session": args.session, "system": frozen["system"] if frozen else None,
                                    "messages": store.messages(args.session),
                                    "events": store.events(args.session)}, indent=2))
+        elif args.command in {"checkpoints", "diff", "rewind"}:
+            return checkpoint_command(args, store, workspace)
         elif args.command == "memory":
             if args.forget:
                 store.forget(args.forget)

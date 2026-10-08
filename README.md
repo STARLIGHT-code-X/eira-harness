@@ -227,6 +227,16 @@ eira memory --forget old-note --workspace /path/to/project
 
 State is workspace-local in `.eira/state.db`. The database stores user messages, assistant messages, tool arguments/results, and execution events. It is permission-restricted but **not encrypted or tamper-proof**. Known environment secrets are redacted on a best-effort basis; arbitrary secrets embedded in project files may not be recognized. Do not commit `.eira/` or share unreviewed traces.
 
+Before each batch of file edits or shell commands, Eira snapshots the workspace into `.eira/history`, so changes made by shell commands are covered too. It never runs git or touches `.git`. Rewind the code, the conversation, or both to any turn:
+
+```bash
+eira checkpoints --workspace /path/to/project          # turns and steps, with file counts
+eira diff --stat --workspace /path/to/project          # what changed since the first checkpoint
+eira rewind turn:2 --both --workspace /path/to/project # shows a summary, then asks to confirm
+```
+
+In chat, use `/checkpoints`, `/diff`, and `/rewind N`. A conversation rewind only hides later messages from the model, and the original prompt comes back in input history. Every code rewind first takes a backup checkpoint, so it can itself be undone. `--no-checkpoints` turns snapshots off. See [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md).
+
 A per-session process lock prevents concurrent writers. Each assistant message is journaled before its tool calls run. On resume, any call without a recorded result is marked `outcome_unknown` and is not replayed. Inspect the filesystem or external state before retrying such an action. Resuming a session uses the current CLI permissions and model settings, not saved authority from the old conversation.
 
 ## Automation and limits

@@ -156,6 +156,16 @@ class Terminal:
                         "Originals stay in the session trace.")
         elif kind == "workspace_context_updated":
             self._write(self._paint(self.palette.muted, "  · workspace guidance or memory changed; update sent to the model"))
+        elif kind in {"checkpoint_failed", "checkpoint_skipped"}:
+            self.notice(f"No checkpoint for this step ({event.get('reason', 'unknown')}); continuing.")
+        elif kind == "rewind_completed":
+            mode = event.get("mode", "")
+            parts = [f"Rewound {mode} to {event.get('checkpoint', '')}"]
+            if mode != "conversation":
+                parts.append(f"{event.get('restored', 0)} restored, {event.get('deleted', 0)} deleted")
+            if mode != "code":
+                parts.append(f"{event.get('hidden_messages', 0)} messages hidden from the model")
+            self.notice(" · ".join(parts))
         elif kind == "tool_completed":
             if event.get("ok"):
                 self._write(self._paint(self.palette.green, "  ✓ tool completed"))
@@ -208,6 +218,9 @@ class Terminal:
         self._write("  /new               Start a new session")
         self._write("  /sessions          List saved sessions")
         self._write("  /resume ID         Resume a saved session")
+        self._write("  /checkpoints       List this session's workspace checkpoints")
+        self._write("  /rewind [N|ck-ID]  Restore code, conversation, or both to a checkpoint")
+        self._write("  /diff [N|ck-ID]    Show file changes since a checkpoint")
         self._write("  /status            Show workspace, model, and permission context")
         self._write("  /instructions      List instruction files (EIRA.md, AGENTS.md, ...) in load order")
         self._write("  /clear             Clear the visible terminal")

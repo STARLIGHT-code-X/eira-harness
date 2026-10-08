@@ -291,9 +291,10 @@ class SessionTests(Base):
         self.write(self.root / "a" / "b" / "c" / "f.txt", "f\n")
         store, session = self.open(self.root)
         toolbox = Toolbox(Workspace(self.root), store, Policy(), session)
+        before = len(toolbox.after_call)  # other features (the lint hook) may register hooks too
         instructions.attach_jit(toolbox, "all")
         instructions.attach_jit(toolbox, "all")
-        self.assertEqual(len(toolbox.after_call), 1)
+        self.assertEqual(len(toolbox.after_call), before + 1)
         guidance = toolbox.call("list_files", {"path": "a/b/c"})["guidance"]
         self.assertEqual([g["path"] for g in guidance], ["a/AGENTS.md", "a/b/AGENTS.md"])
         self.assertLessEqual(len(guidance[0]["content"].encode()), instructions.JIT_MAX_BYTES)
@@ -307,10 +308,11 @@ class SessionTests(Base):
             toolbox.call("read_file", {"path": "d/missing.txt"})
         self.assertEqual(toolbox.call("list_files", {"path": "d"})["guidance"][0]["path"], "d/AGENTS.md")
         off = Toolbox(Workspace(self.root), store, Policy(), session)
+        baseline = list(off.after_call)
         instructions.attach_jit(off, "none")
-        self.assertEqual(off.after_call, [])
+        self.assertEqual(off.after_call, baseline)
         Agent(Scripted(), store, off, limits=Limits(instructions="none"))
-        self.assertEqual(off.after_call, [])
+        self.assertEqual(off.after_call, baseline)
         with self.assertRaises(HarnessError):
             Agent(Scripted(), store, off, limits=Limits(instructions="bogus"))
 
@@ -335,7 +337,7 @@ class SessionTests(Base):
         store, session = self.open(self.root)
         toolbox = Toolbox(Workspace(self.root), store, Policy(), session)
         instructions.attach_jit(toolbox, "all")
-        hook = toolbox.after_call[0]
+        hook = toolbox.after_call[-1]
         result = hook("apply_patch", {"input": patch_text}, {"changed": ["services/payments/x.py"]})
         self.assertEqual([g["path"] for g in result["guidance"]], ["services/payments/AGENTS.md"])
         self.assertNotIn("guidance", hook("apply_patch", {"input": patch_text}, {}))
