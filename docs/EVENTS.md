@@ -25,3 +25,14 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 | `reasoning_withheld` | `reason` (`"redaction"`) | Redaction would have changed signed provider blocks, so the turn was journaled without them |
 | `plan` | `plan` (str) | Journal only, never emitted: the `set_plan` tool recorded the plan |
 | `error` | `error` (str, redacted) | CLI only, never journaled and without `session`: with `--json`, the command ended with an error and exits 2 (a failed run prints `run_failed` first) |
+
+## Checkpoints and rewind
+
+See [CHECKPOINTS.md](CHECKPOINTS.md).
+
+| Event | Fields | When |
+|---|---|---|
+| `checkpoint_created` | `checkpoint` (str, `ck-` and 10 hex digits), `type` (`"turn"` or `"step"`), `files` (int), `bytes` (int) | A workspace snapshot was stored before a file-changing tool batch |
+| `checkpoint_skipped` | `reason` (`"file_limit"` or `"time_limit"`), `checkpoint` (str, only when the snapshot was for a turn checkpoint) | The snapshot exceeded 100,000 files or 10 seconds; no partial checkpoint was stored and the batch ran |
+| `checkpoint_failed` | `reason` (str, redacted), `checkpoint` (str, only when the snapshot was for a turn checkpoint) | Recording a turn or taking a snapshot failed; the batch ran anyway |
+| `rewind_completed` | `checkpoint` (str), `mode` (`"code"`, `"conversation"` or `"both"`), `restored` (int), `deleted` (int), `hidden_messages` (int) | A confirmed `eira rewind` or `/rewind` finished; journaled in the rewound session |

@@ -9,6 +9,7 @@ import json
 import time
 from typing import Callable
 
+from .checkpoints import Checkpoints
 from .security import HarnessError, bounded_json_loads
 from .store import Store
 from .tools import Toolbox
@@ -51,6 +52,7 @@ class Limits:
     max_total_tokens: int = 100_000
     max_tool_output_chars: int = 32_000
     compact: bool = True
+    checkpoints: bool = True
 
 
 def _measure(messages: list[dict]) -> int:
@@ -94,6 +96,7 @@ class Agent:
         if any(isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0
                for value in vars(self.limits).values()):
             raise HarnessError("All runtime limits must be positive.")
+        self.checkpoints = Checkpoints(store, toolbox.workspace) if self.limits.checkpoints else None
 
     def event(self, kind, **payload):
         safe = json.loads(self.store.encode(payload))
@@ -104,6 +107,12 @@ class Agent:
         history = self.store.messages(self.toolbox.session)
         pending = {}
         for message in history:
+            if message["role"] == "marker":
+                # Rewinds are user-only and run under the session lock, so every
+                # call still open at a rewind is hidden by it: never close it into the view.
+                if "eira_rewind" in message:
+                    pending.clear()
+                continue
             if message["role"] == "assistant":
                 for call in message.get("tool_calls", []):
                     pending[call["id"]] = call
@@ -275,7 +284,9 @@ class Agent:
             if update:
                 self.store.append(self.toolbox.session, {"role": "user", "content": update})
                 self.event("workspace_context_updated")
-            self.store.append(self.toolbox.session, {"role": "user", "content": prompt})
+            prompt_seq = self.store.append(self.toolbox.session, {"role": "user", "content": prompt})
+            if self.checkpoints is not None:
+                self.checkpoints.begin_turn(self.toolbox.session, prompt, prompt_seq, self.event)
             self.event("run_started", model=getattr(self.provider, "model", "custom"),
                        shell=self.toolbox.policy.shell_mode, read_only=self.toolbox.policy.read_only)
             tools_used, tokens_used, compactions = 0, 0, 0
@@ -307,7 +318,7 @@ class Agent:
                         # Never journal an empty turn: replaying it would be rejected.
                         self.event("model_completed", step=step + 1, usage=usage)
                         raise HarnessError("Model returned neither text nor tool calls.")
-                    self.store.append(self.toolbox.session, self.journal_form(message))
+                    message_seq = self.store.append(self.toolbox.session, self.journal_form(message))
                     self.event("model_completed", step=step + 1, usage=usage)
                     if message.get("content"):
                         self.event("assistant", text=message["content"])
@@ -317,6 +328,8 @@ class Agent:
                         return {"status": "completed", "session": self.toolbox.session,
                                 "text": message["content"], "tools": tools_used, "tokens": tokens_used,
                                 "steps": step + 1, "seconds": seconds}
+                    if self.checkpoints is not None:
+                        self.checkpoints.before_batch(self.toolbox, calls, message_seq, self.event)
                     budget_hit = False
                     for call in calls:
                         name = call["function"]["name"]
