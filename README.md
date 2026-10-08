@@ -148,7 +148,7 @@ Docker must be installed and the image must already be pulled:
 docker pull python:3.11-slim
 ```
 
-Every shell command displays JSON-escaped review text that preserves invisible characters and requires `y` from an interactive terminal. Docker mode runs as your UID, drops capabilities, disables container networking, limits CPU/memory/processes, makes the container filesystem read-only, and mounts the workspace writable. It does not pull images automatically. Choose an image containing your project's tools with `--docker-image`.
+By default, every shell command displays JSON-escaped review text that preserves invisible characters and requires `y` from an interactive terminal. Docker mode runs as your UID, drops capabilities, disables container networking, limits CPU/memory/processes, makes the container filesystem read-only, and mounts the workspace writable. It does not pull images automatically. Choose an image containing your project's tools with `--docker-image`.
 
 Inside the container, secret files that the file tools block (such as `.env` and keys) read as empty. VCS metadata, agent instructions, and IDE, hook and CI config are read-only, and the approval text summarizes these protections; see [the sandbox mount plan](docs/SANDBOX.md) for the exact lists and what remains writable.
 
@@ -162,6 +162,15 @@ Every edit to a Python, JSON or TOML file is parsed before approval. An edit tha
 For controlled automation, `--approve-writes` preapproves workspace file and memory changes. It never preapproves shell commands or network requests. `--read-only` denies file/memory writes and shell calls; it still saves session history. Prompts and tool data still go to your selected model endpoint.
 
 When stdin is piped, approvals fail closed. Use explicit write/hostname flags for intended automation. There is no global `--yes` or automatic host-shell approval.
+
+For an autonomous test-fix loop, `--shell-approval sandboxed` runs container commands without a prompt, but only while the protected mount plan is active. Destructive commands, such as `rm -rf .` or `git clean -fdx`, still ask, and so does the next command after one creates protected config such as `.vscode/`. A headless run denies those. File edits keep their own approval:
+
+```bash
+eira run 'Run the tests, fix the failures, and repeat until they pass.' \
+  --workspace /path/to/project --shell docker --shell-approval sandboxed --approve-writes
+```
+
+Commands that run automatically can still change unprotected workspace files. Use a project under version control, and enable checkpoints if available so automatic changes can be reverted. The rules, alerts and limits are in [docs/SANDBOX.md](docs/SANDBOX.md#approval-modes).
 
 ## Research
 

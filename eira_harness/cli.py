@@ -71,11 +71,23 @@ def policy_from(args) -> Policy:
         read_only=args.read_only,
         allowed_hosts={h.lower() for h in args.allow_host},
         shell_mode=args.shell,
+        shell_approval=args.shell_approval,
         docker_image=args.docker_image,
         allowed_data_sources=set(args.allow_data_source),
         syntax_guard=args.syntax_guard,
         lint_commands=parse_lint(args.lint_cmd),
     )
+
+
+def shell_status(args) -> str:
+    if args.shell != 'docker':
+        return 'disabled'
+    if args.read_only:
+        return 'denied by read-only policy'
+    if args.shell_approval == 'sandboxed':
+        return ('commands run automatically inside the protected sandbox; '
+                'destructive commands and trust-handoff alerts still ask')
+    return 'approve each command'
 
 
 def renderer(as_json: bool):
@@ -149,6 +161,9 @@ def build_parser():
         command.add_argument("--approve-writes", action="store_true", help="Preapprove workspace file and memory writes; never shell/network")
         command.add_argument("--allow-host", action="append", default=[], help="Preapprove HTTPS GET requests to this exact hostname (repeatable)")
         command.add_argument("--shell", choices=["disabled", "docker"], default="disabled")
+        command.add_argument("--shell-approval", choices=["always", "sandboxed"], default="always",
+                             help="always: approve each shell command (default). sandboxed: run commands in the protected "
+                                  "Docker sandbox without asking; destructive commands and trust-handoff alerts still ask")
         command.add_argument("--docker-image", default="python:3.11-slim", help="Pre-pulled Docker image for shell mode")
         command.add_argument("--syntax-guard", choices=["reject", "warn", "off"], default="reject",
                              help="Reject edits that break Python, JSON or TOML syntax (default), only warn, or skip checks")
@@ -281,6 +296,8 @@ def configure_model(args, ui, force=False, choose_provider=True):
 def run_agent(args, store, workspace):
     if args.read_only and args.approve_writes:
         raise HarnessError('Choose either --read-only or --approve-writes.')
+    if args.shell_approval == 'sandboxed' and args.shell != 'docker':
+        raise HarnessError('--shell-approval sandboxed requires --shell docker')
     interactive = args.command == 'chat'
     if interactive and not sys.stdin.isatty():
         raise HarnessError('Chat requires an interactive terminal; use Eira run "your task" for scripts.')
@@ -296,7 +313,8 @@ def run_agent(args, store, workspace):
 
     def banner():
         ui.banner(workspace.root, args.provider, args.model or 'Not configured', session,
-                  read_only=args.read_only, shell=args.shell)
+                  read_only=args.read_only,
+                  shell=args.shell + (' (auto in sandbox)' if args.shell_approval == 'sandboxed' else ''))
         if args.approve_writes:
             ui.notice('Workspace file and memory writes are preapproved for this session.')
 
@@ -350,6 +368,7 @@ def run_agent(args, store, workspace):
                 ui.notice(f'Writes: {"denied" if args.read_only else "preapproved" if args.approve_writes else "ask first"}\n'
                           f'Hosts: {", ".join(args.allow_host) or "ask first"}\n'
                           f'Data sources: {", ".join(args.allow_data_source) or "ask first"}\n'
+                          f'Shell: {shell_status(args)}\n'
                           f'Context: {args.max_context_chars:,} characters; '
                           f'{"compaction off" if args.no_compact else "older turns are summarized near the limit"}')
             elif command == '/sessions':

@@ -6,6 +6,7 @@ when the daemon or image is unavailable. For example:
 
     EIRA_DOCKER_IMAGE=python:3.11-slim python3 -m unittest tests.test_docker_integration -v
 """
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -158,6 +159,23 @@ class DockerShellIntegrationTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0, result)
         self.assertEqual(result["protected_paths_created"], [".vscode"])
         self.assertEqual(self.tools.shell_alerts, [".vscode"])
+    def test_sandboxed_mode_runs_without_approval_and_keeps_isolation(self):
+        self.tools.policy.shell_approval = "sandboxed"
+        self.tools.policy.approve = lambda name, detail: self.fail("sandboxed mode asked for approval")
+        if importlib.util.find_spec("eira_harness.sandbox") is None:
+            # Until shell-protected-paths merges, stand in for its plan contract.
+            plan = self.tools._shell_plan
+            self.tools._shell_plan = lambda command, timeout: {**plan(command, timeout), "protected": True}
+        result = self.sh("python -c 'print(6*7)' && python - <<'EOF'\n"
+                         "import socket\n"
+                         "try:\n"
+                         "    socket.create_connection(('1.1.1.1', 443), timeout=3)\n"
+                         "    print('network: open')\n"
+                         "except OSError:\n"
+                         "    print('network: blocked')\n"
+                         "EOF")
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertEqual(result["output"].split("\n")[:2], ["42", "network: blocked"])
 
     def test_denied_command_never_starts_a_container(self):
         self.tools.policy.approve = lambda name, detail: False

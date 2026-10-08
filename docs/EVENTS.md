@@ -70,3 +70,9 @@ See [CHECKPOINTS.md](CHECKPOINTS.md).
 | `checkpoint_skipped` | `reason` (`"file_limit"` or `"time_limit"`), `checkpoint` (str, only when the snapshot was for a turn checkpoint) | The snapshot exceeded 100,000 files or 10 seconds; no partial checkpoint was stored and the batch ran |
 | `checkpoint_failed` | `reason` (str, redacted), `checkpoint` (str, only when the snapshot was for a turn checkpoint) | Recording a turn or taking a snapshot failed; the batch ran anyway |
 | `rewind_completed` | `checkpoint` (str), `mode` (`"code"`, `"conversation"` or `"both"`), `restored` (int), `deleted` (int), `hidden_messages` (int) | A confirmed `eira rewind` or `/rewind` finished; journaled in the rewound session |
+
+## Sandboxed autorun
+
+| Event | Fields | When |
+|---|---|---|
+| `approval_decided` | `tool` (`"shell"`), `decision` (`"auto"`, `"approved"` or `"denied"`), `reason` (str: `"sandboxed"` for auto, otherwise why review was needed, such as `"approval mode always"` or `recursive rm of "."`), `command_sha256` (str, hex SHA-256 of the command) | Inside a shell call, after the approval decision and before the container starts; not emitted when the command is rejected earlier (shell disabled, credentials, read-only) |

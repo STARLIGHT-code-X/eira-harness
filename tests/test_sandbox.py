@@ -315,7 +315,9 @@ class PipelineTests(SandboxCase):
             self.assertIn("review them", result["warning"])
             result = self.tools.shell("mkdir -p a/.github/workflows")
             self.assertEqual(result["protected_paths_created"], ["a/.github/workflows"])
-        self.assertEqual(self.tools.shell_alerts, [".vscode", ".vscode", "a/.github/workflows"])
+        # Each human approval acknowledges earlier alerts (sandboxed-autorun), so only the
+        # alert raised after the last approval is still pending.
+        self.assertEqual(self.tools.shell_alerts, ["a/.github/workflows"])
 
     def test_change_during_approval_cancels_the_command(self):
         def approve(name, detail):
