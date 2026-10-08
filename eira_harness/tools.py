@@ -19,6 +19,7 @@ import time
 from typing import Callable
 import uuid
 
+from . import patch
 from .finance import backtest
 from . import sandbox
 from .network import fetch_public, validate_url
@@ -294,6 +295,9 @@ class Toolbox:
                             "replace_all": {"type": "boolean", "description": "Replace every occurrence (default false)"},
                             "expected_sha256": string("Optional SHA-256 from read_file; the edit is refused if the file changed")},
                            ["path", "old_string", "new_string"], self.edit_file, effects=frozenset({"read", "write"})))
+        self.register(Tool("apply_patch", patch.DESCRIPTION,
+                           {"input": string("The entire patch, from *** Begin Patch to *** End Patch", maxLength=1_000_000)},
+                           ["input"], self.apply_patch, effects=frozenset({"read", "write"}), describe=patch.describe))
         self.register(Tool("write_file", "Create or replace a whole UTF-8 file after diff approval. For an existing file supply expected_sha256 from read_file; for a new file use 'new'.",
                            {"path": string("Relative file path"), "content": string("Full new content", maxLength=1_000_000),
                             "expected_sha256": string("Original SHA-256 or 'new'")},
@@ -542,6 +546,9 @@ class Toolbox:
             result["checks"] = checks
         return result
 
+    def apply_patch(self, input, directory=None, routed_from=None):
+        return patch.apply(self, input, directory=directory, routed_from=routed_from)
+
     def search_files(self, query, path=".", glob=None, ignore_case=False):
         if not query:
             raise HarnessError("Search query cannot be empty.")
@@ -588,6 +595,9 @@ class Toolbox:
         return fetch_prices(source, symbol)
 
     def shell(self, command, timeout=30):
+        routed = patch.from_shell_command(command)
+        if routed is not None:
+            return self.apply_patch(routed["input"], directory=routed["directory"], routed_from="shell")
         if self.policy.shell_mode != "docker":
             raise HarnessError("Shell requires --shell docker. Host execution is not supported in this release.")
         if self.store.redact(command) != command:

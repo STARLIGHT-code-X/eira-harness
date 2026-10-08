@@ -1,0 +1,8 @@
+*** Begin Patch
+*** Update File: mixed.txt
+@@
+ two
+-three
++THREE
+ four
+*** End Patch

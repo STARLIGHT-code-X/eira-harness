@@ -1,0 +1,7 @@
+  *** Begin Patch 
+   *** Update File: padded.txt  
+@@
+-before
++after
+*** End of File
+	*** End Patch  

@@ -1,0 +1,3 @@
+*** Begin Patch
+*** Delete File: absent.txt
+*** End Patch

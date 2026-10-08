@@ -1,0 +1,11 @@
+*** Begin Patch
+*** Update File: config.py
+@@ def load():
+     path = 'a'
+-    retries = 1
++    retries = 3
+@@ def save():
+     path = 'b'
+-    retries = 1
++    retries = 5
+*** End Patch

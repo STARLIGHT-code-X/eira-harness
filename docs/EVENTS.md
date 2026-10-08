@@ -32,3 +32,10 @@ Eira reports progress as structured events. `Agent.event(kind, **fields)` redact
 |---|---|---|
 | `sandbox_prepared` | `container` (str), `masked` (int), `read_only` (int), `sanitized_git_config` (int), `entries_scanned` (int), `seconds` (float) | An approved shell command's mount plan was rechecked and its sanitized git config copies written, just before the container starts |
 | `sandbox_protected_path_created` | `paths` (list of str, workspace-relative) | After a shell command, when it created or replaced protected config paths; the result also carries `protected_paths_created` (see [SANDBOX.md](SANDBOX.md)) |
+
+## apply_patch
+
+| Event | Fields | When |
+|---|---|---|
+| `patch_rolled_back` | `patch_id` (str, 12 hex), `path` (str, workspace-relative), `error` (str, errno name such as `"ENOSPC"`) | A write failed during an `apply_patch` commit and every completed step was undone; no file changed |
+| `patch_rollback_failed` | `patch_id` (str), `path` (str), `error` (str, errno name), `directory` (str, absolute path of the kept `.eira/patches/<id>`) | A write failed and the rollback could not undo every step; the journal directory is kept with `state: "rollback_failed"` (see [PATCHES.md](PATCHES.md)) |

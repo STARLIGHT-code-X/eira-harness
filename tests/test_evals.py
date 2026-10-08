@@ -52,16 +52,45 @@ def oracle_answer(task, messages):
 class Oracle:
     """Solves each starter task with Eira's real tools, proving the checks are satisfiable."""
     model = "oracle"
+    steps = ORACLE
 
     def complete(self, messages, tools):
         prompt = next(m["content"] for m in messages if m["role"] == "user")
         task = next(t["id"] for t in STARTER_SUITE["tasks"] if t["prompt"] == prompt)
         done = sum(m["role"] == "tool" for m in messages)
-        steps = ORACLE[task]
+        steps = self.steps[task]
         if done < len(steps):
             name, args = steps[done]
             return call(name, args, f"c{done}"), {"total_tokens": 7}
         return {"role": "assistant", "content": oracle_answer(task, messages)}, {"total_tokens": 3}
+
+
+RENAME_PATCH = """*** Begin Patch
+*** Update File: inventory.py
+@@
+-def calc_total(items):
++def inventory_total(items):
+     return sum(item['price'] * item['qty'] for item in items)
+*** Update File: report.py
+@@
+-from inventory import calc_total
++from inventory import inventory_total
+@@ def summary(items):
+-    return f'Total: {calc_total(items):.2f}'
++    return f'Total: {inventory_total(items):.2f}'
+*** Update File: tests/test_inventory.py
+@@
+-from inventory import calc_total
++from inventory import inventory_total
+@@ def test_total():
+-    assert calc_total([{'price': 2, 'qty': 3}]) == 6
++    assert inventory_total([{'price': 2, 'qty': 3}]) == 6
+*** End Patch"""
+
+
+class PatchOracle(Oracle):
+    """The same oracle, but rename-everywhere is one three-file apply_patch call."""
+    steps = {**ORACLE, "rename-everywhere": [("apply_patch", {"input": RENAME_PATCH})]}
 
 
 class Lazy:
@@ -82,6 +111,13 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(report["summary"]["tool_errors"], 0)
         self.assertEqual(len(seen), len(STARTER_SUITE["tasks"]))
         self.assertGreater(report["summary"]["tokens"], 0)
+
+    def test_starter_suite_is_solvable_with_a_single_patch_for_the_rename(self):
+        report = run_suite(validate_suite(json.loads(json.dumps(STARTER_SUITE))), PatchOracle, Limits())
+        self.assertEqual([r["task"] for r in report["results"] if not r["passed"]], [])
+        self.assertEqual(report["summary"]["tool_errors"], 0)
+        rename = next(r for r in report["results"] if r["task"] == "rename-everywhere")
+        self.assertEqual(rename["tool_calls"], 1)
 
     def test_checks_fail_when_work_is_not_done(self):
         report = run_suite(STARTER_SUITE, Lazy, Limits())

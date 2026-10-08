@@ -1,0 +1,11 @@
+*** Begin Patch
+*** Add File: nested/new.txt
++fresh file
+*** Delete File: delete.txt
+*** Update File: modify.txt
+@@
+ alpha
+-beta
++BETA
+ gamma
+*** End Patch
